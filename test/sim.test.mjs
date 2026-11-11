@@ -3,6 +3,7 @@ import { Sim, footprint, cellZone, SAVE_VERSION } from '../src/sim.js';
 import { B, N, YEAR, TECH, ZONES, LEVELS } from '../src/data.js';
 import { CANYON, PIER_CELLS } from '../src/terrain.js';
 import { readFileSync } from 'node:fs';
+import { run as runBot } from './bots.mjs';
 
 let fails = 0;
 const ok = (c, m) => { if (!c) { fails++; console.log('  FAIL', m); } else console.log('  ok  ', m); };
@@ -221,6 +222,119 @@ console.log('--- v2 save with research in progress');
   ok(!s.S.buildings.some(b => b.type === 'school') && s.researchRate() > 0, 'old settlement without a School keeps researching');
   let d = 0; while (s.S.tech.cur && d < 20) { s.advance(24); d++; }
   ok(s.S.tech.done.insulation, `in-progress project still completes (${d} days)`);
+}
+
+
+console.log('--- population and workforce');
+{
+  const s = new Sim(); const S = s.S;
+  ok(S.kids === 8 && S.adults === 42 && S.able === 42, `children do not work (${S.pop} residents, ${S.kids} children, ${S.able} able)`);
+  // sickness removes workers; the lowest-priority workplaces lose staff first, and say so
+  const before = S.able; S.sick = 12; s.advance(0.2);
+  ok(S.able < before - 8 && S.unfilled > 0, `12 sick: workforce ${before} -> ${S.able}, ${S.unfilled} jobs unfilled`);
+  const short = s.shortList(); ok(short.length > 0 && short.every(b => b.staff < b.slots), 'short-staffed workplaces are listed: ' + short.map(b => s.bname(b)).join(', '));
+  const q = S.buildings.find(b => b.type === 'betting'); ok(q.staff < q.slots && q.eff < 1, 'a short-staffed workplace produces less');
+  ok(s.priorities().some(p => /jobs unfilled/.test(p.title) && /sick/.test(p.why)), 'adviser explains the shortage by sickness');
+  // a medical post turns slow self-recovery into fast treatment
+  const noCare = new Sim(); noCare.S.sick = 10; noCare.advance(24 * 3);
+  const care = new Sim(); care.S.res.wood += 200; care.place('medical', 12, 14, 0); care.advance(24 * 2); care.S.sick = 10; care.S.recov = 0; care.advance(24); const conv = care.S.recov; care.advance(24 * 2);
+  ok(care.beds >= 4 && care.S.sick < noCare.S.sick - 3, `3 days later: ${care.S.sick} still sick with a Medical Post (${care.beds} beds) vs ${noCare.S.sick} without`);
+  ok(conv > 0 && care.S.recov < conv + 3, `treated patients convalesce (${conv} after a day), then return to work`);
+  // births need room and food; deaths are permanent
+  const g = new Sim(); g.S.res.wood += 600; for (let i = 0; i < 4; i++) g.place('settler', 10 + i * 3, 12, 0); g.advance(24 * 12);
+  ok(g.S.yr.births > 0 || g.S.yr.arrived > 0, `with room and food the valley grows (born ${g.S.yr.births}, arrived ${g.S.yr.arrived})`);
+  const full = new Sim(); full.S.pop = 54; full.advance(24 * 10);
+  ok(full.S.yr.arrived === 0 && full.birthFactor <= 0.13, 'no room: no settlers, almost no births');
+  const closed = new Sim(); closed.S.res.wood += 600; for (let i = 0; i < 4; i++) closed.place('settler', 10 + i * 3, 12, 0); closed.setPolicy('closed', true); closed.advance(24 * 12);
+  ok(closed.S.yr.arrived === 0, 'Close the Gates stops immigration');
+}
+
+console.log('--- economy: depletion, regrowth and dependencies');
+{
+  const s = new Sim(); const S = s.S; S.res.wood += 400; S.res.stone += 200;
+  // two more camps on the core stand over-cut it
+  s.place('lumber', 18, 34, 0); s.place('lumber', 22, 38, 0); for (const b of S.buildings) if (b.type === 'lumber') s.setPrio(b.id, 1);
+  const grove = { id: 'grove', type: 'forest', rich: 1 };
+  S.pop += 12; for (let d = 0; d < 20; d++) { S.res.wood = Math.min(S.res.wood, 200); s.advance(24); }   // the timber is being used, not piling up
+  ok(s.nodeLeft(grove) < 0.45, `three camps over-cut the grove to ${Math.round(s.nodeLeft(grove) * 100)}%`);
+  ok(s.nodeFactor(grove) < 1, `yield falls to ${Math.round(s.nodeFactor(grove) * 100)}% as the stand thins`);
+  for (const b of S.buildings) if (b.type === 'lumber') s.setSlots(b.id, 0);
+  const low = s.nodeLeft(grove); s.advance(24 * 30);
+  ok(s.nodeLeft(grove) > low + 0.1, `rested, the stand regrows (${Math.round(low * 100)}% -> ${Math.round(s.nodeLeft(grove) * 100)}%)`);
+  // stone does not come back
+  const t = new Sim(); const shelf0 = t.S.nodes.shelf; t.advance(24 * 10); ok(t.S.nodes.shelf < shelf0, 'quarrying draws down the stone shelf for good');
+  // no timber: turbines lose power, the well loses lift
+  const d = new Sim(); d.advance(2); const ext0 = d.hwRates.ext; d.S.res.wood = 0; for (const b of d.S.buildings) if (b.type === 'lumber') d.setSlots(b.id, 0); d.advance(3);
+  ok(d.hwRates.ext < ext0 * 0.8, `no timber -> turbines starve -> extraction ${Math.round(ext0)} -> ${Math.round(d.hwRates.ext)}`);
+  // no parts: purification loses its filters
+  const f = new Sim(); f.advance(2); const pur0 = f.hwRates.pur; f.S.res.parts = 0; for (const b of f.S.buildings) if (b.type === 'workshop') f.setSlots(b.id, 0); f.advance(1);
+  ok(f.noFilters && f.hwRates.pur < pur0 * 0.8, 'no parts -> no filter media -> purification falls');
+  // prices move with trade
+  const tr = new Sim(); const p0 = tr.price('metal'); tr.S.res.scrip = 5000; tr.S.trade.cargo = 200; tr.trade('metal', 40); ok(tr.price('metal') > p0 * 1.1, 'buying pushes the price up');
+}
+
+console.log('--- aquifer');
+{
+  const s = new Sim(); const S = s.S;
+  const a0 = s.aqLevel(); s.advance(24 * 10);
+  ok(Math.abs(s.aqLevel() - a0) < 0.06, `50 residents in spring are roughly sustainable (${Math.round(a0 * 100)}% -> ${Math.round(s.aqLevel() * 100)}%)`);
+  S.pop = 160; S.kids = 20; S.res.food = 5000; const a1 = s.aqLevel(); s.advance(24 * 12);
+  ok(s.aqLevel() < a1 - 0.015 && s.drawn > s.recharge, `a large town overdraws it (${Math.round(a1 * 100)}% -> ${Math.round(s.aqLevel() * 100)}%, drawn ${Math.round(s.drawn)} vs recharge ${Math.round(s.recharge)})`);
+  S.hw.aq = s.aqMax() * 0.15; s.advance(0.5);
+  ok(s.pf < 0.6, `a low water table cuts drill lift to ${Math.round(s.pf * 100)}%`);
+  ok(s.aqRecharge('Cool Season') > s.aqRecharge('Double Noon') * 3, 'recharge is seasonal');
+}
+
+console.log('--- forecast and season report');
+{
+  const bare = new Sim(); bare.advance(24 * 14); const fb = bare.forecast();
+  const prep = new Sim(); const P = prep.S; P.res.wood += 900; P.res.stone += 500; P.res.metal += 200; P.tech.done.insulation = true; P.tech.done.heatshift = true;
+  prep.place('medical', 12, 14, 0); prep.place('shade', 23, 28, 0); prep.setPolicy('curfew', true);
+  for (const b of [...P.buildings]) if (b.type === 'frontier') prep.upgrade(b.id);
+  prep.advance(24 * 14); const fp = prep.forecast();
+  console.log('  unprepared readiness', Math.round(fb.score * 100) + '%', 'deaths ~' + Math.round(fb.deaths), '| prepared', Math.round(fp.score * 100) + '%', 'deaths ~' + Math.round(fp.deaths));
+  ok(fp.score > fb.score + 0.15 && fp.deaths < fb.deaths, 'forecast responds to preparation');
+  ok(fb.items.length === 7 && fb.items.every(i => i.text && i.advice && i.go), 'every forecast item explains itself and links to an action');
+  bare.advance(24 * 20); prep.advance(24 * 20);
+  const rb = bare.S.reports[0], rp = prep.S.reports[0];
+  ok(rb && rp && rb.summer === 1, 'a report is filed when Double Noon ends');
+  console.log('  unprepared: grade', rb.grade, 'deaths', rb.deaths, 'cases', rb.cases, '| prepared: grade', rp.grade, 'deaths', rp.deaths, 'cases', rp.cases);
+  ok(rp.deaths < rb.deaths && rp.sickPeak < rb.sickPeak && rp.lostWork < rb.lostWork, `the prepared valley loses fewer people and less work (${rp.lostWork} vs ${rb.lostWork} worker-days)`);
+  ok(Math.abs(rb.deaths - rb.fcDeaths) <= Math.max(5, rb.fcDeaths * 0.6), `forecast was in the right range (forecast ${rb.fcDeaths}, actual ${rb.deaths})`);
+  ok(rb.bad.length > 0 && rb.unresolved.length > 0 && rp.good.length > 0, 'report says what went wrong, what held and what is unresolved');
+  ok(bare.events.some(e => e.type === 'report'), 'the UI is told to show the report');
+}
+
+console.log('--- charter');
+{
+  const s = new Sim(); const c = s.charter();
+  ok(c.name === 'Frontier Camp' && c.next.name === 'Settlement' && c.next.reqs.length >= 4, 'starts as a Frontier Camp working toward Settlement');
+  s.S.res.wood += 400; s.place('medical', 12, 14, 0); s.advance(24 * 2);
+  ok(s.charter().next.reqs.find(r => r.id === 'medic').done, 'requirements track the real settlement');
+}
+
+console.log('--- v3 save (day 38, after a first summer)');
+{
+  const old = JSON.parse(readFileSync(new URL('./fixtures-v3-save.json', import.meta.url)));
+  const s = new Sim(JSON.parse(JSON.stringify(old))); const S = s.S;
+  ok(S.v === SAVE_VERSION && S.kids > 0 && S.kids < S.pop && S.recov === 0, `v3 save migrated: ${S.pop} residents, ${S.kids} children`);
+  ok(S.tech.done.heatshift && S.tech.cur === 'insulation' && S.buildings.length === old.buildings.length && S.buildings.find(b => b.type === 'workshop').lv === 2, 'research, buildings and upgrade levels preserved');
+  ok(s.aqLevel() > 0.7 && S.nodes.grove > 0 && S.game > 0 && S.rank === 0, 'aquifer, deposits and herds initialised');
+  s.advance(24 * 60);
+  ok(!S.over && S.reports.length === 1, `old settlement plays on through its next summer (pop ${S.pop}, grade ${S.reports[0].grade})`);
+  const rt = new Sim(JSON.parse(s.serialize())); ok(rt.S.pop === S.pop && rt.S.nodes.vent1 != null && Math.abs(rt.aqLevel() - s.aqLevel()) < 1e-9, 'new state round-trips through save/load');
+}
+
+console.log('--- strategies over three years (scripted players)');
+{
+  const R = {}; for (const n of ['Hands-off', 'Prepared', 'Growth, no preparation', 'No healthcare', 'Strip the core']) R[n] = runBot(n, 3);
+  for (const n in R) { const r = R[n], l = r.rows[r.rows.length - 1]; console.log(`  ${n.padEnd(24)} ${r.over ? 'abandoned day ' + r.day : 'pop ' + l.pop}, ${l.deaths} deaths, summers ${r.reports.map(p => p.grade + '(' + p.deaths + ')').join(' ')}, ${l.rank}`); }
+  const P = R['Prepared'], H = R['Hands-off'];
+  ok(!P.over && P.rows[2].pop > 80 && P.reports.every(r => r.deaths <= 2), 'a prepared valley grows and comes through three summers nearly unharmed');
+  ok(H.rows[H.rows.length - 1].deaths > 20, 'a neglected valley does not');
+  ok(R['No healthcare'].reports[0].deaths > P.reports[0].deaths, 'skipping medical care costs lives');
+  ok(R['Growth, no preparation'].reports[0].cases > P.reports[0].cases * 2, 'growth without heat preparation fills the sickbeds');
+  ok(R['Strip the core'].rows[1].game < 20, 'living off the core herds alone exhausts them');
 }
 
 console.log(fails ? `\n${fails} FAILED` : '\nALL PASSED');

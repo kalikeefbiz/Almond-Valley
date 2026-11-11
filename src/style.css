@@ -215,3 +215,19 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
   #nav button { font-size: 9.5px; }
 }
 [hidden] { display: none !important; }
+
+/* population bar, adviser cards */
+.popbar { display: flex; height: 14px; border-radius: 7px; overflow: hidden; background: rgba(255,255,255,0.08); margin: 4px 0 6px; }
+.popbar i { display: block; min-width: 2px; }
+.io.leg span { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; }
+.io.leg i { width: 9px; height: 9px; border-radius: 2px; display: inline-block; }
+.tech.pri-crit { border-color: rgba(226, 85, 63, 0.8); }
+.tech.pri-warn { border-color: rgba(226, 165, 34, 0.7); }
+.tech.pri-ok { border-color: rgba(132, 221, 108, 0.45); }
+.tech .do { color: var(--gold2); }
+.tech[data-a] { cursor: pointer; }
+.desc.good, b.good, span.good { color: var(--good); } .desc.bad, b.bad, span.bad, small.bad { color: var(--crit); }
+#objc .obj.crit b { color: #ff8a70; } #objc .obj.warn b { color: var(--gold2); }
+#objc .obj.more span { color: var(--mute); font-size: 11.5px; }
+#objc .obj[data-a] { cursor: pointer; }
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-left: 2px; } .dot.crit { background: var(--crit); } .dot.warn { background: var(--gold); }

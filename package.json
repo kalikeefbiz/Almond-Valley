@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "test": "node test/sim.test.mjs"
+    "test": "node test/sim.test.mjs",
+    "balance": "node test/balance.mjs all 4"
   },
   "dependencies": {
     "three": "^0.170.0"

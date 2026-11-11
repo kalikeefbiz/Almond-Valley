@@ -64,6 +64,34 @@ export const NODES = [
   { id: 'nrock', type: 'rock', x: 14, z: 3, rich: 1.4, zone: 'north' },
   { id: 'ntimber', type: 'forest', x: 48, z: 3, rich: 1.4, zone: 'north' },
 ];
+// Deposits are finite or slow to renew. Timber stands regrow; stone shelves and iron seams are worked out for good;
+// vents never run dry. `stock` is the reserve of a richness-1.0 deposit. Richer claims are also proportionally larger.
+export const NODE_STOCK = {
+  forest: { stock: 2600, regen: 0.07 },   // logistic regrowth: about 45 timber a day at half stock
+  rock: { stock: 7000, regen: 0 },
+  ore: { stock: 9000, regen: 0 },
+  vent: { stock: Infinity, regen: 0 },
+};
+// Game herds hunted by the lodges. Claiming North Ridge opens the far herds.
+export const GAME = { core: 1500, north: 2600, regen: 0.11 };
+
+// The aquifer under the Heartwell. Recharge follows the seasons; pumping more than recharge lowers the water table,
+// and a low table cuts what the drill can lift.
+export const AQ = {
+  max: 26000, start: 0.84, recharge: 255,
+  season: { 'Early Spring': 1.25, 'Late Spring': 1.1, 'High Summer': 0.7, 'Double Noon': 0.4, 'Ember Fall': 0.8, 'Autumn': 1.15, 'Cool Season': 1.5 },
+  deepBonus: 0.35,   // each extraction level reaches deeper strata: +35% usable volume
+  deepRecharge: 0.25, // ...and taps 25% more of the recharge
+  mapBonus: 0.3,     // Aquifer Mapping: +30% recharge captured
+};
+
+// Population. Rates are per game day.
+export const POP = {
+  kidsStart: 8, birth: 0.003, mature: 1 / 60, seatPerTeacher: 8,
+  water: 2.2, heatWater: 1.3, cookWood: 0.15,
+  bedCure: 0.55, selfCure: 0.1, convalesce: 0.65,
+};
+
 export const NODE_NAMES = { forest: 'Timber stand', rock: 'Stone shelf', ore: 'Iron seam', vent: 'Aether vent' };
 
 export const CATS = [
@@ -120,37 +148,37 @@ export const B = {
   },
   smokehouse: {
     name: 'Smokehouse', cat: 'production', w: 3, d: 2, cost: { wood: 70, stone: 40 }, work: 50, wear: 0.5,
-    workers: 2, in: { wood: 4 },
+    workers: 2, in: { wood: 4 }, heat: 0.5,
     desc: 'Cures rations so they keep. Each one halves spoilage for 700 stored rations.',
   },
   lumber: {
     name: 'Lumber Camp', cat: 'production', w: 2, d: 2, cost: { wood: 40, stone: 20 }, work: 45, wear: 0.6,
-    workers: 5, out: { wood: 48 }, outdoor: true, node: 'forest', auto: 'harvesting',
+    workers: 5, out: { wood: 40 }, outdoor: true, node: 'forest', auto: 'harvesting',
     desc: 'Fells and hauls timber. Must stand near a timber stand.',
   },
   quarry: {
     name: 'Quarry', cat: 'production', w: 3, d: 3, cost: { wood: 60, metal: 10 }, work: 60, wear: 0.7,
-    workers: 5, out: { stone: 30 }, outdoor: true, node: 'rock', auto: 'excavation',
+    workers: 5, out: { stone: 24 }, outdoor: true, node: 'rock', auto: 'excavation',
     desc: 'Cuts stone from a shelf. Must stand near a stone shelf.',
   },
   mine: {
     name: 'Iron Mine', cat: 'production', w: 3, d: 3, cost: { wood: 100, stone: 80, parts: 10 }, work: 110, wear: 1.0,
-    workers: 6, out: { metal: 26 }, power: 2, node: 'ore', auto: 'excavation',
+    workers: 6, skilled: 2, out: { metal: 26 }, power: 2, node: 'ore', auto: 'excavation', tool: 1, heat: 0.5,
     desc: 'Shaft and headframe on an iron seam. Needs power for hoists and pumps.',
   },
   workshop: {
     name: 'Workshop', cat: 'production', w: 3, d: 2, cost: { wood: 90, stone: 50, metal: 20 }, work: 70, wear: 0.8,
-    workers: 4, in: { wood: 6, metal: 5 }, out: { parts: 8 },
+    workers: 4, skilled: 1, in: { wood: 6, metal: 5 }, out: { parts: 8 }, heat: 0.5,
     desc: 'Turns timber and iron into machine parts. Also fits Hunter Clicker rigs.',
   },
   fabrication: {
     name: 'Fabrication Plant', cat: 'production', w: 4, d: 3, cost: { wood: 200, stone: 150, metal: 120, parts: 40 }, work: 180, wear: 1.0,
-    workers: 6, skilled: 4, strictSkill: true, power: 6, tech: 'fabrication',
+    workers: 6, skilled: 4, strictSkill: true, power: 6, tech: 'fabrication', tool: 1.2, heat: 1,
     desc: 'Assembles industrial Clickers. Needs skilled workers, power and a parts supply.',
   },
   refinery: {
     name: 'Aether Plant', cat: 'production', w: 4, d: 3, cost: { wood: 180, stone: 160, metal: 140, parts: 50 }, work: 180, wear: 1.1,
-    workers: 6, skilled: 3, strictSkill: true, power: 5, in: { water: 10 }, out: { aether: 12 }, node: 'vent', tech: 'aether',
+    workers: 6, skilled: 3, strictSkill: true, power: 5, in: { water: 10 }, out: { aether: 12 }, node: 'vent', tech: 'aether', tool: 1.2, heat: 1,
     desc: 'Condenses vent gas into aether cells. Must stand near an aether vent.',
   },
   // ---------- infrastructure ----------
@@ -170,8 +198,13 @@ export const B = {
   },
   generator: {
     name: 'Steam Generator', cat: 'infra', w: 2, d: 2, cost: { wood: 80, stone: 60, metal: 60, parts: 10 }, work: 90, wear: 1.2,
-    workers: 2, in: { wood: 14, water: 6 }, gen: 12, powerRadius: 7, tech: 'steam',
+    workers: 2, skilled: 1, in: { wood: 14, water: 6 }, gen: 12, powerRadius: 7, tech: 'steam', tool: 0.4, heat: 1,
     desc: 'Burns timber for 12 power. Its own boiler serves 7 tiles around it.',
+  },
+  reclaim: {
+    name: 'Reclamation Works', cat: 'infra', w: 3, d: 2, cost: { stone: 120, metal: 90, parts: 30 }, work: 110, wear: 0.9,
+    workers: 3, skilled: 1, power: 3, tech: 'reclaim', tool: 0.5, limit: 2,
+    desc: 'Settling tanks and filters. Each one returns 22% of the water residents use to the Heartwell basins.',
   },
   warehouse: {
     name: 'Warehouse', cat: 'infra', w: 3, d: 2, cost: { wood: 80, stone: 40 }, work: 55, wear: 0.3,
@@ -180,14 +213,14 @@ export const B = {
   },
   utility: {
     name: 'Utility Depot', cat: 'infra', w: 3, d: 2, cost: { wood: 90, stone: 60, metal: 50, parts: 10 }, work: 80, wear: 0.4,
-    workers: 3,
+    workers: 3, skilled: 1,
     desc: 'Maintenance crews keep machinery and homes in repair, using parts.',
   },
   // ---------- civic ----------
   medical: {
     name: 'Medical Post', cat: 'civic', w: 2, d: 2, cost: { wood: 80, stone: 40, metal: 10 }, work: 60, wear: 0.4,
-    workers: 2,
-    desc: 'Treats heat sickness and cuts deaths. Each medic covers about 30 residents.',
+    workers: 2, skilled: 1, beds: 6,
+    desc: 'Six beds. Patients in a staffed bed recover five times faster and rarely die. The sick cannot work.',
   },
   shade: {
     name: 'Cooling Pavilion', cat: 'civic', w: 2, d: 2, cost: { wood: 40, stone: 30 }, work: 30, wear: 0.3,
@@ -196,8 +229,8 @@ export const B = {
   },
   school: {
     name: 'School', cat: 'civic', w: 3, d: 2, cost: { wood: 120, stone: 60 }, work: 80, wear: 0.3,
-    workers: 2,
-    desc: 'Trains skilled workers and drives research.',
+    workers: 2, skilled: 1,
+    desc: 'Teaches the valley\'s children, trains skilled workers and drives research.',
   },
   office: {
     name: 'Community Office', cat: 'civic', w: 3, d: 2, cost: { wood: 110, stone: 70 }, work: 80, wear: 0.3,
@@ -224,19 +257,19 @@ export const B = {
 export const BUILD_ORDER = {
   housing: ['frontier', 'settler', 'insulated', 'climate'],
   production: ['hunter', 'farm', 'smokehouse', 'lumber', 'quarry', 'mine', 'workshop', 'fabrication', 'refinery'],
-  infra: ['road', 'pipe', 'valve', 'watertower', 'pylon', 'generator', 'warehouse', 'utility'],
+  infra: ['road', 'pipe', 'valve', 'watertower', 'reclaim', 'pylon', 'generator', 'warehouse', 'utility'],
   civic: ['medical', 'shade', 'school', 'office', 'market', 'betting', 'depot'],
 };
 
 // Staffing priority (lower = filled first)
 export const PRIO_ORDER = {
   medical: 1, hunter: 2, farm: 2, generator: 3, smokehouse: 4, lumber: 4, utility: 5, mine: 5, quarry: 6,
-  workshop: 6, refinery: 6, fabrication: 7, warehouse: 7, school: 8, office: 8, market: 9, depot: 9, betting: 10,
+  workshop: 6, refinery: 6, reclaim: 4, fabrication: 7, warehouse: 7, school: 8, office: 8, market: 9, depot: 9, betting: 10,
 };
 
 export const HW = {
   ext: { name: 'Extraction', base: 270, workers: [4, 6, 8], power: [6, 9, 12] },
-  pur: { name: 'Purification', base: 260, workers: [3, 5, 7], power: [4, 6, 8] },
+  pur: { name: 'Purification', base: 260, workers: [3, 5, 7], power: [4, 6, 8], parts: [0.5, 0.8, 1.2] },
   tur: { name: 'Power Turbines', base: 11, workers: [3, 4, 5], wood: [8, 11, 14] },
   pool: { name: 'Reserve Pools', cap: [2400, 4000, 6000] },
   mult: [1, 1.6, 2.3],
@@ -271,9 +304,10 @@ export const TECH = {
   // Infrastructure
   steam: { branch: 'infra', name: 'Steam Power', rp: 20, cost: { metal: 40 }, desc: 'Unlocks the Steam Generator.' },
   irrigation: { branch: 'infra', name: 'Drip Irrigation', rp: 20, cost: { parts: 10 }, desc: 'Farms use half the water and yield 20% more.' },
-  deepdrill: { branch: 'infra', name: 'Deep Drilling', rp: 28, cost: { metal: 60, parts: 10 }, desc: 'Allows Level 2 upgrades for each Heartwell system.' },
+  deepdrill: { branch: 'infra', name: 'Deep Drilling', rp: 28, cost: { metal: 60, parts: 10 }, desc: 'Allows Level 2 upgrades for each Heartwell system. Each extraction level reaches deeper water.' },
   cooling: { branch: 'infra', name: 'Turbine Cooling Loops', rp: 24, cost: { metal: 50, parts: 15 }, req: ['steam'], desc: 'Heartwell machinery takes 40% less heat wear; turbines +15%.' },
-  aquifer: { branch: 'infra', name: 'Aquifer Mapping', rp: 50, cost: { parts: 40, aether: 20 }, req: ['deepdrill'], desc: 'Allows Level 3 upgrades for each Heartwell system.' },
+  aquifer: { branch: 'infra', name: 'Aquifer Mapping', rp: 50, cost: { parts: 40, aether: 20 }, req: ['deepdrill'], desc: 'Allows Level 3 upgrades for each Heartwell system and captures 30% more aquifer recharge.' },
+  reclaim: { branch: 'infra', name: 'Water Reclamation', rp: 30, cost: { metal: 50, parts: 20 }, req: ['steam'], desc: 'Unlocks the Reclamation Works, which recycles household water.' },
   // Industry & Automation
   tools: { branch: 'industry', name: 'Tempered Tools', rp: 22, cost: { metal: 30, parts: 20 }, desc: '+15% output from lodges, camps, quarries and mines.' },
   precision: { branch: 'industry', name: 'Precision Machining', rp: 30, cost: { metal: 40, parts: 20 }, req: ['tools'], facility: 'workshop', desc: 'Allows Workshops to be upgraded to Advanced Workshops.' },
@@ -286,7 +320,7 @@ export const TECH = {
   climate: { branch: 'housing', name: 'Climate Control', rp: 44, cost: { parts: 20, aether: 20 }, req: ['insulation', 'aether'], desc: 'Unlocks Tier IV Climate Residences.' },
   // Civic Development
   heatshift: { branch: 'civic', name: 'Noon Curfew', rp: 10, cost: {}, desc: 'Unlocks the Noon Curfew policy: outdoor crews rest through the worst heat.' },
-  medicine: { branch: 'civic', name: 'Heat Medicine', rp: 16, cost: { food: 40 }, desc: 'Heat sickness spreads 30% slower and medics treat 50% more.' },
+  medicine: { branch: 'civic', name: 'Heat Medicine', rp: 16, cost: { food: 40 }, desc: 'Heat sickness spreads 30% slower, patients in beds recover 50% faster, and Clinics can become Infirmaries.' },
   apprentice: { branch: 'civic', name: 'Apprenticeships', rp: 16, cost: { wood: 40 }, desc: 'Schools train skilled workers 50% faster.' },
   laboratory: { branch: 'civic', name: 'Field Laboratory', rp: 26, cost: { metal: 30, parts: 10 }, req: ['apprentice'], facility: 'school', desc: 'Allows Schools to be upgraded to Field Laboratories (more research).' },
   // Trade & Logistics
@@ -310,6 +344,9 @@ export const LEVELS = {
     { name: 'Records Hall', cost: { wood: 60, stone: 60, parts: 5 }, work: 50, workers: 4, rp: 1.3 }],
   warehouse: [{ name: 'Warehouse' },
     { name: 'Racked Warehouse', tech: 'warehousing', cost: { wood: 80, metal: 30 }, work: 50, cap: 1.7 }],
+  medical: [{ name: 'Medical Post', beds: 6 },
+    { name: 'Clinic', cost: { wood: 80, stone: 60, metal: 20 }, work: 60, workers: 4, beds: 14 },
+    { name: 'Infirmary', tech: 'medicine', cost: { stone: 80, metal: 40, parts: 20 }, work: 90, workers: 6, beds: 24 }],
   hunter: [{ name: "Hunter's Lodge" }, { name: "Outfitted Lodge", cost: { wood: 50, stone: 20, metal: 10 }, work: 35, out: 1.3 }],
   lumber: [{ name: 'Lumber Camp' }, { name: 'Sawmill Camp', cost: { wood: 40, stone: 30, metal: 15 }, work: 35, out: 1.3 }],
   quarry: [{ name: 'Quarry' }, { name: 'Terraced Quarry', cost: { wood: 50, stone: 20, metal: 20 }, work: 40, out: 1.3 }],
@@ -324,6 +361,7 @@ export const POLICIES = {
   curfew: { name: 'Noon Curfew', tech: 'heatshift', desc: 'Outdoor crews rest at midday in hot weather. −30% outdoor output, far less exposure.' },
   ration: { name: 'Water Rationing', desc: 'Residents draw 25% less water and farms are cut off first. Hurts morale.' },
   feast: { name: 'Extra Rations', desc: 'Residents eat 30% more. Lifts morale and health.' },
+  closed: { name: 'Close the Gates', desc: 'Turn new settlers away at the station. Use it when water, food or housing cannot carry more people.' },
 };
 
 export const EXPEDITIONS = {

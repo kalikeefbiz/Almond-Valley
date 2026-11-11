@@ -1,5 +1,5 @@
 // HUD and panels. Plain DOM, event delegation through data-a="action:arg:arg".
-import { B, CATS, BUILD_ORDER, RES_INFO, TECH, TECH_ORDER, BRANCHES, LEVELS, HW, CLICKERS, POLICIES, ZONES, EXPEDITIONS, PRICES, RIG_COST, YEAR, NODE_NAMES, NODE_RANGE } from './data.js';
+import { B, CATS, BUILD_ORDER, RES_INFO, TECH, TECH_ORDER, BRANCHES, LEVELS, NODE_NAMES as NNAMES, GAME, HW, CLICKERS, POLICIES, ZONES, EXPEDITIONS, PRICES, RIG_COST, YEAR, NODE_NAMES, NODE_RANGE } from './data.js';
 import { footprint, costText } from './sim.js';
 
 const ic = (n, cls = '') => `<svg class="ic ${cls}"><use href="#i-${n}"/></svg>`;
@@ -128,7 +128,10 @@ export class UI {
         <li><b>Tap</b> a building to manage workers, upgrades and repairs.</li>
         <li><b>Build</b> opens construction. Tap a spot, then the green tick.</li>
         <li>The <b>Heartwell</b> at the centre is your only water. Watch its pools.</li>
-        <li>Homes protect people from heat. Research <b>Insulated Homes</b> early, add a <b>Medical Post</b>, and keep rations stocked before summer.</li>
+        <li><b>Priorities</b> (top left) lists what needs you now and why. Tap one to go there.</li>
+        <li>The sick cannot work. A staffed <b>Medical Post</b> gets them back in days; homes and a <b>Noon Curfew</b> keep them from falling sick.</li>
+        <li>Before each summer, open the <b>Double Noon forecast</b>: it projects water, housing, beds and food from your valley as it stands.</li>
+        <li>Timber stands, herds and the <b>aquifer</b> can be over-used. Survey new districts before they run down.</li>
         <li>The bar under the temperature shows the year. Red is Double Noon.</li>
       </ul>
       <div class="btns"><button class="btn pri" data-a="modal-x:resume">${first ? 'Begin' : 'Close'}</button></div>`);
@@ -147,8 +150,9 @@ export class UI {
     const sim = this.sim, S = sim.S, g = this.g, el = this.el;
     // speed
     this.set(el.speed, [[0, 'pause'], [1, 'play'], [2, 'ff'], [4, 'fff']].map(([s, i]) => `<button data-a="speed:${s}" class="${g.speed === s ? 'on' : ''}" aria-label="speed ${s}">${ic(i)}</button>`).join(''));
-    el.lv.textContent = 'Settlement Lv. ' + sim.level();
-    el.lvb.style.width = ((S.pop % 40) / 40 * 100) + '%';
+    const ch = sim.charter(), chDone = ch.next ? ch.next.reqs.filter(r => r.done).length / ch.next.reqs.length : 1;
+    el.lv.textContent = ch.name;
+    el.lvb.style.width = (chDone * 100) + '%';
     // resources
     const chip = (r, val, sub, cls, low) => `<button class="chip ${low ? 'low' : ''}" data-a="open:${r === 'power' ? 'production' : 'storage'}"><span class="c-${r}">${ic(RICON[r])}</span><span><b>${val}</b><small class="${cls}">${sub}</small></span></button>`;
     let h = '';
@@ -164,15 +168,17 @@ export class UI {
     const hot = sim.h > 0.45;
     el.clim.classList.toggle('hot', hot);
     this.set(el.clim, `<span style="color:${hot ? '#ff8a5a' : '#ffd24a'}">${ic('temp')}</span><span class="tval">${Math.round(T)}°C</span><span style="color:#ffd24a">${ic('sun')}</span><span class="sea">${sim.seasonName()}</span><span class="day">D<span class="dw">ay </span>${sim.day() + 1} · ${String(Math.floor(hr)).padStart(2, '0')}:${String(Math.floor((hr % 1) * 6) * 10).padStart(2, '0')}</span><i class="yr"></i><i class="yrm" style="left:${(doy / YEAR * 100).toFixed(1)}%"></i>`);
-    this.set(el.popc, `<span style="color:var(--gold)">${ic('people')}</span>${S.pop}<small>/ ${S.housingCap}</small>`);
+    this.set(el.popc, `<span style="color:var(--gold)">${ic('people')}</span>${S.pop}<small>/ ${S.housingCap}</small>${S.sick ? `<small class="bad" style="margin-left:5px">${S.sick} sick</small>` : ''}`);
     el.heatfx.style.opacity = Math.max(0, Math.min(0.55, (sim.h - 0.35) * 0.6 * (g.view.env.day || 0)));
-    // objectives
-    const objs = sim.objectives().filter(o => !S.obj[o.id]).slice(0, 3);
+    // adviser: what needs attention now (live from the simulation), then the charter
+    const pri = sim.priorities(), top = pri.slice(0, 3);
     el.objc.classList.toggle('shut', this.objShut);
-    this.set(el.objc, `<h4 data-a="objt">${ic('target')}Valley Objectives${ic('chev')}</h4><div class="body">${objs.map(o => `<div class="obj"><i class="bx"></i><div><b>${o.name}</b><span>${o.desc}${o.max > 1 ? ` (${Math.min(o.cur, o.max)}/${o.max})` : ''}</span></div></div>`).join('') || '<div class="obj"><div><b>All objectives complete</b><span>The valley is yours to shape.</span></div></div>'}</div>`);
-    const al = sim.alerts();
+    this.set(el.objc, `<h4 data-a="objt">${ic('target')}Priorities${pri.some(p => p.sev === 'crit') ? ' <i class="dot crit"></i>' : pri.some(p => p.sev === 'warn') ? ' <i class="dot warn"></i>' : ''}${ic('chev')}</h4><div class="body">${top.map(o => `<div class="obj ${o.sev}" data-a="go:${o.go}"><i class="bx"></i><div><b>${o.title}</b><span>${o.do || o.why}</span></div></div>`).join('')}<div class="obj more" data-a="open:charter"><div><span>${ch.next ? `Next rank: ${ch.next.name} (${ch.next.reqs.filter(r => r.done).length}/${ch.next.reqs.length})` : ''} · all priorities ›</span></div></div></div>`);
+    const dnD = sim.daysToDoubleNoon(), al = pri.filter(p => p.sev === 'crit' && (this.objShut || !top.includes(p)) && !/^Double Noon in/.test(p.title)).slice(0, 2).map(p => ({ sev: p.sev, msg: p.title, go: p.go }));
+    if (dnD > 0 && dnD <= 16) al.push({ sev: 'warn', msg: `Double Noon in ${Math.ceil(dnD)} day${Math.ceil(dnD) > 1 ? 's' : ''} · readiness ${pct(sim.forecast().score)}`, go: 'forecast' });
+    else if (dnD === 0) al.push({ sev: 'crit', msg: `Double Noon · ${S.sick} sick, ${sim.inCare} in beds`, go: 'forecast' });
     el.alc.style.display = al.length ? '' : 'none';
-    this.set(el.alc, al.slice(0, 4).map(a => `<button class="alert ${a.sev}" data-a="go:${a.go}">${ic('warn')}<span>${a.msg}</span></button>`).join(''));
+    this.set(el.alc, al.slice(0, 3).map(a => `<button class="alert ${a.sev}" data-a="go:${a.go}">${ic('warn')}<span>${a.msg}</span></button>`).join(''));
     // right buttons
     el['b-ov'].classList.toggle('on', g.view.overlayMode !== 'none');
     this.set(el.ovpop, OVERLAYS.map(([id, n]) => `<button data-a="ov:${id}" class="${g.view.overlayMode === id ? 'on' : ''}">${n}</button>`).join(''));
@@ -253,7 +259,10 @@ export class UI {
       if (d.housing && info.shaded) nets.push(`<span class="stat good">Cooling pavilion nearby</span>`);
       if (d.waterRadius) nets.push(`<span class="stat ${sim.C.onNet[b.id] ? 'good' : 'bad'}">${ic('water')}${sim.C.onNet[b.id] ? 'Connected to main' : 'Not touching a connected main'}</span>`);
       if (b.type === 'pylon') nets.push(`<span class="stat ${sim.C.pylonOn[b.id] ? 'good' : 'bad'}">${ic('power')}${sim.C.pylonOn[b.id] ? 'Energised' : 'Out of range of a powered source'}</span>`);
-      if (d.node) nets.push(`<span class="stat">Deposit richness ×${(info.rich || 0).toFixed(1)}</span>`);
+      if (d.node && info.node) { const left = sim.nodeLeft(info.node); nets.push(`<span class="stat ${left < 0.3 ? 'bad' : left < 0.5 ? 'warn' : ''}">${NNAMES[info.node.type]} ×${info.node.rich.toFixed(1)}${info.node.type === 'vent' ? '' : ' · ' + pct(left) + ' left'}</span>`); if (sim.nodeFactor(info.node) < 1) nets.push(`<span class="stat bad">Yield ${pct(sim.nodeFactor(info.node))}</span>`); }
+      if (b.type === 'hunter') nets.push(`<span class="stat ${sim.gameFactor() < 0.6 ? 'bad' : ''}">Herds ${pct(S.game / sim.gameCap())}${sim.gameFactor() < 1 ? ' · hunt ' + pct(sim.gameFactor()) : ''}</span>`);
+      if (d.housing && info.heat) nets.push(`<span class="stat bad">Heavy industry next door: +${Math.round(7 * info.heat)}% heat</span>`);
+      if (d.tool) nets.push(`<span class="stat">Tooling ${d.tool} parts/day</span>`);
       if (nets.length) h += `<div class="stats">${nets.join('')}</div>`;
       // production
       if (d.out || d.in || d.gen) {
@@ -267,8 +276,9 @@ export class UI {
         if (wait.length) h += `<p class="desc" style="margin-top:6px">Waiting for carriers: ${wait.map(([r, v]) => `${fmt(v)} ${RES_INFO[r].name.toLowerCase()}`).join(', ')}</p>`;
       }
       if (b.type === 'smokehouse') h += `<p class="desc">Preserving up to ${fmt(700 * b.eff)} rations. Spoilage now ${fmt(sim.spoil || 0)}/day.</p>`;
-      if (b.type === 'medical') h += `<p class="desc">${S.sick} sick. Medics cover ${pct(sim.medCover || 0)} of residents.</p>`;
-      if (b.type === 'school') h += `<p class="desc">${S.skilled} skilled workers of ${S.pop}. Research ${sim.researchRate().toFixed(1)} pts/day.</p>`;
+      if (b.type === 'medical') h += `<div class="stats"><span class="stat">${ic('heart')}Beds ${sim.lvDef(b).beds}</span><span class="stat ${S.sick > sim.beds ? 'bad' : 'good'}">In care ${sim.inCare} of ${S.sick} sick</span><span class="stat">Recovering ${S.recov}</span></div><p class="desc">A staffed bed cures a patient in about ${sim.hasTech('medicine') ? 'a day' : 'two days'}; without one it takes ten or more, and far more die. Beds need medics: ${b.staff}/${sim.workersOf(b)} at work${b.sk ? '' : ', none of them skilled (−35%)'}.</p>`;
+      if (b.type === 'reclaim') h += `<p class="desc">Returning ${pct(sim.reclaimShare || 0)} of household water to the Heartwell basins.</p>`;
+      if (b.type === 'school') h += `<p class="desc">${S.kids} children, ${sim.seats || 0} school places: schooled children come of age as skilled workers. ${S.skilled} skilled adults of ${S.pop - S.kids}. Research ${sim.researchRate().toFixed(1)} pts/day.</p>`;
       if (b.type === 'utility') h += `<p class="desc">Repair capacity ${fmt(sim.repairPool || 0)} condition/day (1 part per 12).</p>`;
       if (b.type === 'station') { const t = sim.tradeInfo(); h += `<div class="stats"><span class="stat">${ic('train')}${t.here ? 'Train at the platform' : `Next train in ${fmtH(t.next)}`}</span><span class="stat">Cargo space ${t.cargo}</span></div><div class="btns"><button class="btn" data-a="open:storage">Open trade</button></div>`; }
       if (b.type === 'depot') h += `<div class="btns"><button class="btn" data-a="open:storage">Open trade</button></div>`;
@@ -324,6 +334,8 @@ export class UI {
     const wp = S.res.water / cap;
     let h = `<div class="stats"><span class="stat ${Object.keys(hw.broken).length ? 'bad' : 'good'}">● ${Object.keys(hw.broken).length ? 'Component failure' : 'Operational'}</span><span class="stat c-water">${ic('water')}${sign(S.flow.water)}/day</span><span class="stat">${ic('people')}Demand ${fmt(R.demand || 0)}/day</span><span class="stat c-power">${ic('power')}${fmt(sim.powerGen)} made · ${fmt(sim.powerUse)} used</span></div>`;
     h += meter('Reserve pools', wp, `${fmt(S.res.water)} / ${fmt(cap)}`, wp < 0.25 ? 'r' : 'w');
+    { const lv = sim.aqLevel(), net = (sim.recharge || 0) - (sim.drawn || 0);
+      h += `<div class="sec">Aquifer</div>` + meter('Water table', lv, pct(lv), lv < 0.4 ? 'r' : 'w') + `<div class="stats"><span class="stat">Recharge ${fmt(sim.recharge || 0)}/d</span><span class="stat">Drawn ${fmt(sim.drawn || 0)}/d</span><span class="stat ${net < -10 ? 'bad' : 'good'}">${net >= 0 ? 'Rising' : 'Falling'} ${fmt(Math.abs(net))}/d</span><span class="stat ${sim.pf < 0.95 ? 'bad' : ''}">Drill lift ${pct(sim.pf)}</span></div><p class="desc">The valley's only water. It refills in the cool months and barely at all in Double Noon. Draw more than seeps back and the table falls; under half, the drill lifts less. Deeper extraction levels reach more of it.${sim.noFilters ? ' <span class="bad">Purification is out of filter media (parts).</span>' : ''}</p>`; }
     const row = (k, label, val, max, unit) => {
       const lv = hw.lv[k], mx = HW[k].workers[lv - 1], up = sim.hwCanUpgrade(k);
       return `<div class="sec">${label} · Lv ${lv}</div>${meter(unit, max > 0 ? Math.min(1, val / max) : 0, fmt(val) + (k === 'tur' ? '' : '/d'), k === 'tur' ? '' : 'w')}
@@ -341,21 +353,81 @@ export class UI {
   }
 
   p_people() {
-    const sim = this.sim, S = sim.S, P = S.policies;
-    let h = `<div class="stats"><span class="stat">${ic('people')}${S.pop} residents</span><span class="stat">${ic('home')}Housing ${S.housingCap}</span><span class="stat ${S.homeless ? 'bad' : ''}">Homeless ${S.homeless}</span><span class="stat ${S.sick > S.pop * 0.12 ? 'bad' : ''}">${ic('heart')}Sick ${S.sick}</span><span class="stat">Skilled ${S.skilled}</span><span class="stat ${S.deaths ? 'bad' : ''}">Lost ${S.deaths}</span></div>`;
-    h += meter('Morale', S.morale / 100, fmt(S.morale), S.morale < 35 ? 'r' : 'g') + meter('Heat exposure', Math.min(1, (sim.expo || 0)), pct(Math.min(1, sim.expo || 0)), 'r');
-    h += `<div class="stats"><span class="stat">Workforce ${S.able}</span><span class="stat ${S.idle > 4 ? 'warn' : ''}">Unassigned ${S.idle}</span><span class="stat">Outdoor ${S.outdoor}</span>${S.away ? `<span class="stat">On expedition ${S.away}</span>` : ''}<span class="stat">Work efficiency ${pct(sim.workMult)}</span></div>`;
-    h += '<div class="sec">Morale factors</div><div class="io">' + Object.entries(sim.moraleParts || {}).filter(([, v]) => Math.abs(v) >= 0.5).map(([k, v]) => `<span style="color:${k === 'Base' ? 'var(--mute)' : v > 0 ? 'var(--good)' : 'var(--crit)'}">${k} ${k === 'Base' ? fmt(v) : sign(v)}</span>`).join('') + '</div>';
+    const sim = this.sim, S = sim.S, P = S.policies, pr = sim.prosperity();
+    const working = S.able - S.idle, adults = S.adults ?? (S.pop - S.kids);
+    let h = `<div class="stats"><span class="stat">${ic('people')}${S.pop} residents</span><span class="stat">${ic('home')}Housing ${S.housingCap}</span>${S.homeless ? `<span class="stat bad">Homeless ${S.homeless}</span>` : ''}<span class="stat ${S.deaths ? 'bad' : ''}">Lost ${S.deaths}</span><span class="stat">Prosperity ${Math.round(pr.score)}</span></div>`;
+    // who can work, and who cannot
+    const seg = (n, c, t) => n > 0 ? `<i style="flex:${n};background:${c}" title="${t}"></i>` : '';
+    h += `<div class="sec">Who is in the valley</div><div class="popbar">${seg(working, '#e2a522', 'working')}${seg(S.idle, '#8d7f66', 'unassigned')}${seg(S.away, '#6fb7d8', 'away')}${seg(S.recovA, '#d98a4a', 'recovering')}${seg(S.sickA, '#e2553f', 'sick')}${seg(S.kids, '#5d6b4a', 'children')}</div>
+      <div class="io leg"><span><i style="background:#e2a522"></i>At work ${working}</span><span><i style="background:#8d7f66"></i>Unassigned ${S.idle}</span>${S.away ? `<span><i style="background:#6fb7d8"></i>Expedition ${S.away}</span>` : ''}<span><i style="background:#d98a4a"></i>Recovering ${S.recov}</span><span><i style="background:#e2553f"></i>Sick ${S.sick}</span><span><i style="background:#5d6b4a"></i>Children ${S.kids}</span></div>
+      <div class="stats"><span class="stat">Adults ${adults}</span><span class="stat">Skilled ${S.skilled}</span><span class="stat ${S.unfilled >= 4 ? 'bad' : ''}">Jobs ${S.jobs - S.unfilled} / ${S.jobs}</span><span class="stat">Outdoor ${S.outdoor}</span><span class="stat">Work efficiency ${pct(sim.workMult)}</span></div>`;
+    const wf = sim.priorities().find(p => /jobs unfilled|without work/.test(p.title));
+    if (wf) h += `<p class="desc"><b class="${wf.sev === 'info' ? '' : 'bad'}">${wf.title}.</b> ${wf.why} ${wf.do}</p>`;
+    // health
+    h += `<div class="sec">Health</div><div class="stats"><span class="stat ${S.sick > sim.beds ? 'bad' : ''}">${ic('heart')}Sick ${S.sick}</span><span class="stat ${sim.beds < S.sick ? 'bad' : 'good'}">In beds ${sim.inCare} / ${sim.beds}</span><span class="stat">Recovering ${S.recov}</span><span class="stat">New cases ~${((sim.sickRate || 0) * Math.max(0, S.pop - S.sick - S.recov)).toFixed(1)}/day</span></div>`
+      + meter('Heat exposure', Math.min(1, (sim.expo || 0)), pct(Math.min(1, sim.expo || 0)), 'r')
+      + `<p class="desc">${sim.beds ? `Patients in a staffed bed are back at work in a few days.` : 'There are no staffed beds: the sick recover slowly on their own and cannot work.'}${S.sick > sim.beds ? ` ${S.sick - sim.beds} have no bed.` : ''} Exposure comes from homes (${pct(Math.min(1, sim.homeExpo || 0))}) and outdoor work (${pct(Math.min(1, sim.outExpo || 0))}).</p>`;
+    // growth
+    const y = S.yr, free = S.housingCap - S.pop;
+    h += `<div class="sec">Growth this year</div><div class="stats"><span class="stat good">Born ${y.births}</span><span class="stat good">Arrived ${y.arrived}</span><span class="stat">Came of age ${y.grown}</span><span class="stat ${y.left ? 'bad' : ''}">Left ${y.left}</span><span class="stat ${y.deaths ? 'bad' : ''}">Died ${y.deaths}</span></div>
+      <p class="desc">${P.closed ? 'The gates are closed: no settlers are being admitted.' : free <= 0 ? 'Housing is full, so no settlers come and few children are born.' : pr.score < 45 ? `Prosperity ${Math.round(pr.score)} is too low to draw settlers (45 needed).` : `Settlers arrive by train while there is housing (${free} free) and work for them.`} ${S.kids} children; ${sim.seats || 0} school places.</p>
+      <div class="io">${Object.entries(pr.parts).map(([k, v]) => `<span>${k} ${Math.round(v)}</span>`).join('')}</div>`;
+    h += meter('Morale', S.morale / 100, fmt(S.morale), S.morale < 35 ? 'r' : 'g');
+    h += '<div class="io">' + Object.entries(sim.moraleParts || {}).filter(([, v]) => Math.abs(v) >= 0.5).map(([k, v]) => `<span style="color:${k === 'Base' ? 'var(--mute)' : v > 0 ? 'var(--good)' : 'var(--crit)'}">${k} ${k === 'Base' ? fmt(v) : sign(v)}</span>`).join('') + '</div>';
     h += '<div class="sec">Policies</div>';
     for (const k in POLICIES) { const p = POLICIES[k], locked = p.tech && !sim.hasTech(p.tech); h += `<div class="rowl"><div class="nm"><b>${p.name}</b><small>${locked ? 'Requires research: ' + TECH[p.tech].name : p.desc}</small></div><button class="tog ${P[k] ? 'on' : ''} ${locked ? 'off2' : ''}" data-a="policy:${k}" aria-label="${p.name}"></button></div>`; }
     h += '<div class="sec">Workforce assignment</div>';
     h += `<div class="rowl" data-a="go:heartwell"><div class="nm"><b>Heartwell</b><small>${S.hw.staff.ext + S.hw.staff.pur + S.hw.staff.tur} crew · tap to manage</small></div></div>`;
-    for (const b of sim.C.staffList) {
-      if (b.progress != null) continue; const d = B[b.type];
-      h += `<div class="rowl"><div class="nm" data-a="focusb:${b.id}"><b>${d.name}</b><small class="${b.eff <= 0 ? 'bad' : ''}">${b.staff}/${sim.workersOf(b)} · ${b.eff > 0 ? pct(b.eff) : b.issue}</small></div>${stepper('slots:' + b.id, b.slots, sim.workersOf(b))}</div>`;
+    const rows = sim.C.staffList.filter(b => b.progress == null).slice().sort((a, b) => ((b.slots - b.staff) - (a.slots - a.staff)));
+    for (const b of rows) {
+      const short = b.staff < b.slots;
+      h += `<div class="rowl"><div class="nm" data-a="focusb:${b.id}"><b>${sim.bname(b)}</b><small class="${b.eff <= 0 || short ? 'bad' : ''}">${b.staff}/${b.slots} at work${short ? ` — short ${b.slots - b.staff}` : ''} · ${b.eff > 0 ? pct(b.eff) + ' output' : b.issue}${b.prio ? ' · staffed first' : ''}</small></div>${stepper('slots:' + b.id, b.slots, sim.workersOf(b))}</div>`;
     }
-    h += '<div class="sec">Record</div>' + spark(S.hist, 'p', '#f3e7d0', 'Population') + spark(S.hist, 'm', '#84dd6c', 'Morale');
+    h += `<p class="desc">Workers fill the Heartwell first, then workplaces in priority order. Lower the slots of a workplace to send its people elsewhere, or mark a building "Staff first" in its panel.</p>`;
+    h += '<div class="sec">Record</div>' + spark(S.hist, 'p', '#f3e7d0', 'Population') + spark(S.hist, 's', '#e2553f', 'Sick and recovering') + spark(S.hist, 'm', '#84dd6c', 'Morale') + spark(S.hist, 'a', '#5ee6ff', 'Aquifer %');
     return { title: 'People', body: h };
+  }
+
+  // ---- adviser and charter
+  p_charter() {
+    const sim = this.sim, S = sim.S, c = sim.charter(), pri = sim.priorities();
+    let h = '<div class="sec">Needs attention now</div>';
+    h += pri.map(p => `<div class="tech pri-${p.sev}" data-a="go:${p.go}"><div class="hd"><b>${p.title}</b><span>${ic('chev')}</span></div><p>${p.why}</p>${p.do ? `<p class="do">${p.do}</p>` : ''}</div>`).join('') || '<p class="desc">Nothing urgent. The valley is running well.</p>';
+    if (c.next) {
+      h += `<div class="sec">${c.name} → ${c.next.name}</div><p class="desc">${c.next.blurb} Reward: ${costText(c.next.reward)}.</p>`;
+      for (const r of c.next.reqs) h += `<div class="rowl"><div class="nm"><b style="color:${r.done ? 'var(--good)' : 'var(--text)'}">${r.done ? '✓ ' : ''}${r.text}</b>${r.max > 1 ? meter('', r.cur / r.max, `${fmt(r.cur)} / ${fmt(r.max)}`, r.done ? 'g' : '') : ''}</div></div>`;
+    }
+    const pr = sim.prosperity();
+    h += `<div class="sec">Prosperity ${Math.round(pr.score)}</div><div class="io">${Object.entries(pr.parts).map(([k, v]) => `<span>${k} ${Math.round(v)}</span>`).join('')}</div><p class="desc">Prosperity draws settlers and raises the birth rate. It is built from morale, housing quality, food and water security, employment, health and services.</p>`;
+    h += `<div class="btns"><button class="btn" data-a="open:forecast">${ic('sun')}Double Noon forecast</button>${S.reports.length ? `<button class="btn" data-a="open:report">Season reports</button>` : ''}</div>`;
+    return { title: `Almond Valley <small>${c.name}</small>`, body: h };
+  }
+
+  // ---- Double Noon forecast, from live simulation data
+  p_forecast() {
+    const sim = this.sim, S = sim.S, f = sim.forecast(), during = f.days === 0;
+    let h = `<div class="stats"><span class="stat ${f.score < 0.5 ? 'bad' : f.score < 0.75 ? 'warn' : 'good'}">Readiness ${pct(f.score)}</span><span class="stat">${during ? 'Double Noon is here' : `In ${Math.ceil(f.days)} days`}</span><span class="stat">${ic('temp')}Peak ${Math.round(f.peakT)}°C</span></div>`;
+    h += `<p class="desc">${during ? 'Projected for the rest of this Double Noon' : `Projected for summer ${f.summer}`} from the valley as it stands today: about <b>${Math.round(f.cases)}</b> cases of heat sickness and <b>${Math.round(f.deaths)}</b> deaths. Every summer peaks hotter than the last.</p>`;
+    if (during && S.dn) h += `<div class="stats"><span class="stat ${S.dn.deaths > S.dn.goal ? 'bad' : ''}">Lost so far ${S.dn.deaths} (charter limit ${S.dn.goal})</span><span class="stat">Cases ${S.dn.cases}</span><span class="stat">Lowest reserve ${pct(S.dn.minWater)}</span></div>`;
+    for (const it of f.items.slice().sort((a, b) => a.score - b.score)) h += `<div class="tech pri-${it.status === 'ok' ? 'ok' : it.status}" data-a="go:${it.go}"><div class="hd"><b>${it.name}</b><span class="${it.status === 'ok' ? 'good' : 'bad'}">${it.status === 'ok' ? 'Ready' : it.status === 'warn' ? 'At risk' : 'Not ready'} · ${pct(it.score)}</span></div><p>${it.text}</p>${it.status === 'ok' ? '' : `<p class="do">${it.advice}</p>`}</div>`;
+    if (S.reports.length) h += `<div class="btns"><button class="btn" data-a="open:report">Last summer's report</button></div>`;
+    return { title: 'Double Noon forecast', body: h };
+  }
+
+  // ---- season report
+  p_report(i) {
+    const S = this.sim.S; if (!S.reports.length) return null;
+    const idx = i == null ? S.reports.length - 1 : Math.max(0, Math.min(S.reports.length - 1, i)), r = S.reports[idx];
+    const d = (a) => `${fmt(a[0])} → ${fmt(a[1])}`;
+    let h = `<div class="stats"><span class="stat ${'AB'.includes(r.grade) ? 'good' : r.grade === 'C' ? 'warn' : 'bad'}">Grade ${r.grade}</span><span class="stat">${ic('temp')}Peak ${r.peakT}°C</span><span class="stat">Forecast going in ${pct(r.fc)}</span></div>`;
+    h += `<div class="sec">People</div><div class="stats"><span class="stat ${r.deaths ? 'bad' : 'good'}">Died ${r.deaths}${r.deaths ? ` (${r.untreated} untreated)` : ''}</span><span class="stat">Fell sick ${r.cases}</span><span class="stat">Most sick at once ${r.sickPeak}</span><span class="stat">Still sick or recovering ${r.stillSick}</span><span class="stat">Population ${r.pop0} → ${r.pop1}</span></div>`;
+    h += `<div class="sec">Work and stores</div><div class="stats"><span class="stat">Worker-days lost to sickness ${fmt(r.lostWork)}</span><span class="stat">Jobs unfilled, average ${r.unfilled}</span><span class="stat ${r.eff < 0.75 ? 'bad' : ''}">Output ${pct(r.eff)} of spring</span></div><div class="stats"><span class="stat c-water">Water used ${fmt(r.waterUsed)}</span><span class="stat ${r.minWater < 0.2 ? 'bad' : ''}">Lowest reserve ${pct(r.minWater)}</span><span class="stat">Aquifer ${pct(r.aq0)} → ${pct(r.aq1)}</span></div><div class="stats"><span class="stat c-food">Rations ${d(r.food)}</span><span class="stat c-wood">Timber ${d(r.wood)}</span><span class="stat c-parts">Parts ${d(r.parts)}</span><span class="stat ${r.breaks ? 'bad' : ''}">Breakdowns ${r.breaks}${r.broken ? ` (${r.broken} still down)` : ''}</span></div>`;
+    h += `<p class="desc">Summer charter: lose no more than ${r.goal}. ${r.met ? `<b class="good">Met</b> — ${r.reward} scrip from the railway.` : `<b class="bad">Missed</b> (${r.deaths} lost).`}</p>`;
+    if (r.good.length) h += '<div class="sec">What held</div>' + r.good.map(x => `<p class="desc good">+ ${x}</p>`).join('');
+    if (r.bad.length) h += '<div class="sec">What went wrong</div>' + r.bad.map(x => `<p class="desc bad">− ${x}</p>`).join('');
+    if (r.unresolved.length) h += '<div class="sec">Still unresolved</div>' + r.unresolved.map(u => `<div class="tech pri-warn" data-a="go:${u.go}"><div class="hd"><b>${u.title}</b><span>${ic('chev')}</span></div>${u.do ? `<p class="do">${u.do}</p>` : ''}</div>`).join('');
+    if (S.reports.length > 1) h += `<div class="btns">${S.reports.map((x, k) => `<button class="btn sm ${k === idx ? 'pri' : ''}" data-a="open:report:${k}">Summer ${x.summer}</button>`).join('')}</div>`;
+    return { title: `Summer ${r.summer} report <small>Double Noon, year ${r.year}</small>`, body: h };
   }
 
   p_production() {
@@ -381,10 +453,11 @@ export class UI {
     }
     h += `<p class="desc">Rations last ${(S.res.food / Math.max(1, S.pop)).toFixed(1)} days. Spoilage ${fmt(sim.spoil || 0)}/day. Warehouses add storage; water towers add reserve.</p>`;
     h += `<div class="sec">Rail trade</div><div class="stats"><span class="stat">${ic('train')}${t.here ? 'Train at the platform' : 'Next train in ' + fmtH(t.next)}</span><span class="stat">Cargo space ${t.cargo}</span><span class="stat c-scrip">${ic('scrip')}${fmt(S.res.scrip)} scrip</span></div>`;
+    h += `<p class="desc">Prices move: buying pushes a price up, selling pushes it down, and food costs more in the hot months.</p>`;
     if (!sim.count('depot')) h += `<p class="desc">The station handles 40 units a train. Build a Trade Depot (research Rail Contracts) for bulk freight.</p>`;
     for (const r of ['food', 'wood', 'stone', 'metal', 'parts', 'aether']) {
-      const p = PRICES[r];
-      h += `<div class="rowl"><div class="nm"><b><span class="c-${r}">${ic(RICON[r])}</span> ${RES_INFO[r].name}</b><small>Buy ${p} · sell ${p / 2} scrip each</small></div><button class="btn sm" data-a="trade:${r}:-20">Sell 20</button><button class="btn sm pri" data-a="trade:${r}:20">Buy 20</button></div>`;
+      const p = sim.price(r), base = PRICES[r];
+      h += `<div class="rowl"><div class="nm"><b><span class="c-${r}">${ic(RICON[r])}</span> ${RES_INFO[r].name}</b><small>Buy ${p.toFixed(1)} · sell ${(p / 2).toFixed(1)} scrip each${p > base * 1.08 ? ' · <span class="bad">dear</span>' : p < base * 0.92 ? ' · <span class="good">cheap</span>' : ''}</small></div><button class="btn sm" data-a="trade:${r}:-20">Sell 20</button><button class="btn sm pri" data-a="trade:${r}:20">Buy 20</button></div>`;
     }
     return { title: 'Storage & Trade', body: h };
   }

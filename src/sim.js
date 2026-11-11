@@ -2,12 +2,14 @@
 import {
   N, YEAR, RES, BASE_CAP, WAREHOUSE_CAP, ZONES, BUILD_PACE, NODES, NODE_RANGE, B, PRIO_ORDER, HW, CLICKERS,
   RIG_COST, TECH, LEVELS, PRICES, EXPEDITIONS, seasonTemp, seasonName, START_BUILDINGS, START_ROADS, START_PIPES,
+  NODE_STOCK, GAME, AQ, POP,
 } from './data.js';
+import { civ } from './civ.js';
 import { findPath } from './path.js';
 import { CANYON, PIER_CELLS } from './terrain.js';
 
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
-export const SAVE_VERSION = 3;
+export const SAVE_VERSION = 4;
 
 export function footprint(b) {
   const def = B[b.type];
@@ -32,25 +34,30 @@ export function cellZone(x, z) {
 }
 export function costText(cost) { return Object.entries(cost || {}).map(([k, v]) => `${v} ${k}`).join(', '); }
 
+export function nodeCap(nd) { return NODE_STOCK[nd.type].stock * nd.rich; }
+
 function newState() {
   const S = {
     v: SAVE_VERSION, rng: 987654321, time: 6, speed: 1,
     res: { water: 1500, food: 520, wood: 500, stone: 320, metal: 300, parts: 50, aether: 60, scrip: 150 },
-    flow: {}, pop: 50, sick: 0, skilled: 8, deaths: 0, grief: 0, morale: 62, thirst: 0, hunger: 0, rigs: 2,
-    acc: { sick: 0, death: 0, heal: 0, edu: 0 },
+    flow: {}, pop: 50, kids: POP.kidsStart, sick: 0, recov: 0, skilled: 8, deaths: 0, grief: 0, morale: 62, thirst: 0, hunger: 0, rigs: 2,
+    acc: { sick: 0, death: 0, heal: 0, edu: 0, birth: 0, grow: 0, recov: 0 },
+    yr: { births: 0, arrived: 0, left: 0, deaths: 0, grown: 0 }, last: {},
+    nodes: {}, game: GAME.core * 0.8, reports: [], dn: null, rank: 0, tasks: {}, effBase: 0.85,
     buildings: [], nextId: 1, roads: new Array(N * N).fill(0), pipes: new Array(N * N).fill(0),
     zones: { core: true }, expeditions: [],
     hw: {
       lv: { ext: 1, pur: 1, tur: 1, pool: 1 }, slots: { ext: 4, pur: 3, tur: 3 }, staff: { ext: 0, pur: 0, tur: 0 },
-      cond: { drill: 92, turA: 88, turB: 90, silo: 94, pump: 90 }, broken: {}, raw: 120, coolant: 100,
+      cond: { drill: 92, turA: 88, turB: 90, silo: 94, pump: 90 }, broken: {}, raw: 120, coolant: 100, aq: AQ.max * AQ.start,
     },
     clickers: [], nextCid: 1,
     tech: { done: {}, cur: null, rp: 0 },
-    policies: { curfew: false, ration: false, feast: false },
-    trade: { cargo: 40 }, train: { next: 34, at: -99 },
+    policies: { curfew: false, ration: false, feast: false, closed: false },
+    trade: { cargo: 40, px: {} }, train: { next: 34, at: -99 },
     obj: {}, log: [], hist: [], dayDeaths: 0, summers: 0, over: false, season: 'Early Spring', lastDay: 0,
   };
   for (const r of RES) S.flow[r] = 0;
+  for (const nd of NODES) S.nodes[nd.id] = nodeCap(nd);
   return S;
 }
 
@@ -59,7 +66,7 @@ export class Sim {
     this.events = [];   // transient events for the UI/renderer
     this.version = 0;   // bumps whenever the map changes
     this.C = {};
-    if (saved) this.S = migrate(saved);
+    if (saved) { this.S = migrate(saved); this._migrated = true; }
     else {
       this.S = newState();
       for (const [t, x, z, r] of START_BUILDINGS) this._addBuilding(t, x, z, r, true);
@@ -71,6 +78,7 @@ export class Sim {
     this.fd = {}; for (const r of RES) this.fd[r] = 0;
     this.powerGen = 0; this.powerUse = 0; this.powerRatio = 1; this.hwPower = 1; this.workMult = 1;
     this.h = 0; this.T = 22; this.pumpBudget = 0; this.hwRates = { ext: 0, pur: 0, demand: 0 };
+    this.inCare = 0; this.beds = 0; this.medCover = 0; this.expo = 0; this.reclaimShare = 0; this.pf = 1; this.recharge = 0;
     this.rebuild();
     this._assign();
     this._housing();
@@ -236,8 +244,13 @@ export class Sim {
         if (powerCov[z * N + x]) info.powered = true;
       }
       info.linked = def.storage || def.dropPoint || touches(f, linkNet);
-      if (def.node) info.rich = this.nodeRich(def.node, f);
-      if (def.housing) for (const s of shades) if (rectRectCheb(f, s) <= B.shade.shadeRadius) info.shaded = true;
+      if (def.node) { info.rich = this.nodeRich(def.node, f); info.node = this.pickNode(def.node, f); }
+      if (def.housing) {
+        for (const s of shades) if (rectRectCheb(f, s) <= B.shade.shadeRadius) info.shaded = true;
+        // heavy industry next door radiates heat into homes
+        let heat = 0; for (const o of S.buildings) { const hd = B[o.type].heat; if (hd && o.progress == null && rectRectCheb(f, footprint(o)) <= 3) heat += hd; }
+        info.heat = Math.min(2.5, heat);
+      }
       C.info[b.id] = info;
     }
     // --- walk grid
@@ -249,6 +262,23 @@ export class Sim {
     this.version++;
     this.dirty = false;
   }
+  // the deposit a worksite draws on: the best one in range by richness x what is left of it
+  pickNode(type, f) {
+    let best = null, bv = -1;
+    for (const nd of NODES) {
+      if (nd.type !== type || rectRectCheb(f, { x: nd.x, z: nd.z, w: 2, d: 2 }) > NODE_RANGE) continue;
+      const v = nd.rich * (0.05 + this.nodeFactor(nd));
+      if (v > bv) { bv = v; best = nd; }
+    }
+    return best;
+  }
+  nodeLeft(nd) { const cap = nodeCap(nd); return cap === Infinity ? 1 : clamp((this.S.nodes[nd.id] ?? cap) / cap, 0, 1); }
+  nodeFactor(nd) { // yield multiplier from what is left
+    const left = this.nodeLeft(nd);
+    return nd.type === 'forest' ? clamp(left / 0.45, 0.1, 1) : clamp(left / 0.15, 0, 1);
+  }
+  gameCap() { return GAME.core + (this.S.zones.north ? GAME.north : 0); }
+  gameFactor() { return clamp(this.S.game / (0.45 * this.gameCap()), 0.1, 1); }
   nodeRich(type, f) {
     let best = 0;
     for (const nd of NODES) {
@@ -454,17 +484,24 @@ export class Sim {
     const S = this.S;
     return { cargo: S.trade.cargo, next: Math.max(0, S.train.next - S.time), here: S.time - S.train.at < 5 };
   }
+  // rail prices: the season sets a premium on water and food, and your own buying or selling moves the market
+  price(res) {
+    const px = this.S.trade.px[res] || 1;
+    const hot = (res === 'water' || res === 'food') ? 1 + 0.5 * Math.min(1, this.heatOf(seasonTemp(this.doy(), this.year()))) : 1;
+    return PRICES[res] * px * hot;
+  }
   trade(res, qty) { // qty > 0 buy, < 0 sell
-    const S = this.S, n = Math.abs(qty);
+    const S = this.S, n = Math.abs(qty), P = this.price(res);
+    const move = (d) => { S.trade.px[res] = clamp((S.trade.px[res] || 1) + d * n * 0.004, 0.5, 2.5); };
     if (n > S.trade.cargo) return { ok: false, reason: 'No cargo space left on this train' };
     if (qty > 0) {
-      const cost = Math.ceil(PRICES[res] * n);
+      const cost = Math.ceil(P * n);
       if (S.res.scrip < cost) return { ok: false, reason: 'Not enough scrip' };
       if (S.res[res] + n > this.cap(res)) return { ok: false, reason: 'Storage full' };
-      S.res.scrip -= cost; S.res[res] += n;
+      S.res.scrip -= cost; S.res[res] += n; move(1);
     } else {
       if (S.res[res] < n) return { ok: false, reason: 'Not enough stock' };
-      S.res[res] -= n; S.res.scrip += Math.floor(PRICES[res] * n * 0.5);
+      S.res[res] -= n; S.res.scrip += Math.floor(P * n * 0.5); move(-1);
     }
     S.trade.cargo -= n;
     return { ok: true };
@@ -532,21 +569,26 @@ export class Sim {
   _assign() {
     const S = this.S, hw = S.hw;
     let away = 0; for (const e of S.expeditions) away += e.crew;
-    const able = Math.max(0, Math.floor((S.pop - S.sick) * 0.85) - away);
-    let left = able, skLeft = Math.min(S.skilled, able);
+    S.kids = clamp(S.kids, 0, S.pop);
+    const adults = S.pop - S.kids, share = S.pop > 0 ? adults / S.pop : 0;
+    // the sick and the convalescent cannot work; children do not work
+    const sickA = Math.min(adults, Math.round(S.sick * share)), recovA = Math.min(adults - sickA, Math.round(S.recov * share));
+    const able = Math.max(0, adults - sickA - recovA - away);
+    let left = able, skLeft = Math.min(S.skilled, able), jobs = 0, filled = 0;
     for (const r of ['ext', 'pur', 'tur']) {
       const want = Math.min(hw.slots[r], HW[r].workers[hw.lv[r] - 1]);
-      const got = Math.min(want, left); hw.staff[r] = got; left -= got;
+      const got = Math.min(want, left); hw.staff[r] = got; left -= got; jobs += want; filled += got;
     }
     let outdoor = 0;
     for (const b of this.C.staffList) {
       const def = B[b.type];
       if (b.progress != null || !b.on || b.broken) { b.staff = 0; b.sk = 0; continue; }
-      const got = Math.min(b.slots, left); b.staff = got; left -= got;
+      const got = Math.min(b.slots, left); b.staff = got; left -= got; jobs += b.slots; filled += got;
       if (def.skilled) { b.sk = Math.min(def.skilled, got, skLeft); skLeft -= b.sk; }
       if (def.outdoor) outdoor += got;
     }
     S.idle = left; S.able = able; S.outdoor = outdoor; S.away = away;
+    S.adults = adults; S.sickA = sickA; S.recovA = recovA; S.jobs = jobs; S.unfilled = jobs - filled;
   }
 
   _housing() {
@@ -564,7 +606,7 @@ export class Sim {
       if (def.tier === 4 && (!info.powered || this.powerRatio < 0.5 || S.res.aether <= 0)) prot *= 0.6;
       if (info.shaded && this.shadeOn) prot += (1 - prot) * 0.4;
       b.res = res; b.prot = prot;
-      expo += res * h * (1 - prot);
+      expo += res * h * Math.min(1, (1 - prot) + 0.07 * (info.heat || 0));
       mor += res * def.housing.morale; eff += res * def.housing.eff; housed += res; tierSum += res * def.tier;
     }
     const homeless = Math.max(0, S.pop - cap);
@@ -599,26 +641,44 @@ export class Sim {
     this.powerGen = gen; this.powerUse = use + hwUse; this.hwUse = hwUse;
   }
 
+  aqMax() { return AQ.max * (1 + AQ.deepBonus * (this.S.hw.lv.ext - 1)); }
+  aqLevel() { return clamp(this.S.hw.aq / this.aqMax(), 0, 1); }
+  // natural recharge per day: seasonal, a little less each year as the summers grow hotter
+  aqRecharge(season = this.seasonName()) {
+    return AQ.recharge * (AQ.season[season] || 1) * (1 + AQ.deepRecharge * (this.S.hw.lv.ext - 1)) * (this.hasTech('aquifer') ? 1 + AQ.mapBonus : 1) * (1 - 0.025 * Math.min(6, this.year()));
+  }
+  // a low water table cuts what the drill can lift; deeper extraction levels suffer less
+  aqPressure(level = this.aqLevel()) { return clamp(0.2 + level * (1.6 + 0.4 * (this.S.hw.lv.ext - 1)), 0.2, 1); }
   _heartwell(dt) {
     const S = this.S, hw = S.hw, h = Math.min(1, this.h), f = dt / 24;
     const condF = c => 0.4 + 0.6 * hw.cond[c] / 100;
     const pw = 0.25 + 0.75 * this.hwPower;
+    // aquifer
+    this.recharge = this.aqRecharge();
+    hw.aq = Math.min(this.aqMax(), hw.aq + this.recharge * f);
+    this.pf = this.aqPressure();
     // extraction
     const extStaff = hw.staff.ext / HW.ext.workers[hw.lv.ext - 1];
-    const ext = hw.broken.drill ? 0 : HW.ext.base * HW.mult[hw.lv.ext - 1] * extStaff * pw * condF('drill') * (1 - 0.18 * h);
-    const rawCap = 300 * HW.mult[hw.lv.pur - 1];
-    let got = Math.min(ext * f, rawCap - hw.raw + 60);
+    const ext = hw.broken.drill ? 0 : HW.ext.base * HW.mult[hw.lv.ext - 1] * extStaff * pw * condF('drill') * (1 - 0.18 * h) * this.pf;
+    const rawCap = this.rawCap = 300 * HW.mult[hw.lv.pur - 1];
+    let got = Math.max(0, Math.min(ext * f, rawCap - hw.raw + 60, hw.aq));
+    hw.aq -= got;
+    const load = ext > 0 ? got / (ext * f) : 0;
+    this.hwLoad = (this.hwLoad ?? load) + (load - (this.hwLoad ?? load)) * (1 - Math.exp(-dt / 6));
+    this.drawn = (this.drawn || 0) + ((got / f) - (this.drawn || 0)) * (1 - Math.exp(-dt / 6));
     // coolant basins fill first
     const coolNeed = Math.min(120 - hw.coolant, got * 0.5);
     hw.coolant += coolNeed; got -= coolNeed;
     hw.raw = Math.min(rawCap, hw.raw + got);
     const coolUse = 10 * (1 + 2 * h) * HW.turMult[hw.lv.tur - 1] * f * (hw.staff.tur > 0 ? 1 : 0.2);
     hw.coolant = Math.max(0, hw.coolant - coolUse);
-    // purification
+    // purification: needs crew, power and filter media (parts)
     const purStaff = hw.staff.pur / HW.pur.workers[hw.lv.pur - 1];
-    const pur = hw.broken.silo ? 0 : HW.pur.base * HW.mult[hw.lv.pur - 1] * purStaff * pw * condF('silo');
+    const media = HW.pur.parts[hw.lv.pur - 1] * f;
+    this.noFilters = purStaff > 0 && S.res.parts < media;
+    const pur = hw.broken.silo ? 0 : HW.pur.base * HW.mult[hw.lv.pur - 1] * purStaff * pw * condF('silo') * (this.noFilters ? 0.7 : 1);
     const moved = Math.min(pur * f, hw.raw, this.C.waterCap - S.res.water);
-    if (moved > 0) { hw.raw -= moved; this.add('water', moved); }
+    if (moved > 0) { hw.raw -= moved; this.add('water', moved); if (!this.noFilters) this.add('parts', -media * Math.min(1, moved / (pur * f))); }
     // turbine fuel
     if (hw.staff.tur > 0) this.add('wood', -HW.tur.wood[hw.lv.tur - 1] * f);
     // pumps
@@ -629,23 +689,29 @@ export class Sim {
   drawWater(need) {
     if (need <= 0) return 0;
     const got = Math.min(need, this.S.res.water, this.pumpBudget);
-    if (got > 0) { this.pumpBudget -= got; this.add('water', -got); }
+    if (got > 0) { this.pumpBudget -= got; this.add('water', -got); if (this.S.dn) this.S.dn.waterUsed += got; }
     return got;
   }
 
   _people(dt) {
-    const S = this.S, h = this.h, f = dt / 24, P = S.policies;
+    const S = this.S, h = this.h, f = dt / 24, P = S.policies, hw = S.hw;
     const pop = S.pop; if (pop <= 0) return;
-    // water
-    const wNeed = pop * 2.2 * (1 + 1.7 * Math.min(1.2, h)) * (P.ration ? 0.75 : 1) * f;
+    const ema = (cur, v, tau) => cur + (v - cur) * (1 - Math.exp(-dt / tau));
+    // ---- water: reserve first, then (in desperation) the untreated basins
+    const wNeed = pop * POP.water * (1 + POP.heatWater * Math.min(1.2, h)) * (P.ration ? 0.75 : 1) * f;
     const wGot = this.drawWater(wNeed);
-    const short = 1 - wGot / wNeed;
-    S.thirst += (short - S.thirst) * (1 - Math.exp(-dt / 3));
+    if (this.reclaimShare > 0) hw.raw = Math.min(this.rawCap || 300, hw.raw + wGot * this.reclaimShare);
+    let rawDrunk = 0;
+    if (wGot < wNeed * 0.98 && hw.raw > 1) { rawDrunk = Math.min(wNeed - wGot, hw.raw); hw.raw -= rawDrunk; }
+    S.rawDrink = ema(S.rawDrink || 0, rawDrunk / wNeed, 3);
+    S.thirst = ema(S.thirst, 1 - (wGot + rawDrunk) / wNeed, 3);
     this.hwRates.demand = wNeed / f;
-    // food
+    // ---- food and cooking fuel
     const fNeed = pop * (P.feast ? 1.3 : 1) * f;
     const fGot = Math.min(fNeed, S.res.food); this.add('food', -fGot);
-    S.hunger += ((1 - fGot / fNeed) - S.hunger) * (1 - Math.exp(-dt / 8));
+    S.hunger = ema(S.hunger, 1 - fGot / fNeed, 8);
+    const cNeed = pop * POP.cookWood * f, cGot = Math.min(cNeed, S.res.wood); this.add('wood', -cGot);
+    S.cold = ema(S.cold || 0, 1 - cGot / cNeed, 8);
     // spoilage
     let keep = 0;
     for (const b of S.buildings) if (b.type === 'smokehouse') keep += 700 * (b.eff || 0);
@@ -657,53 +723,94 @@ export class Sim {
     let shadeNeed = 0; for (const b of S.buildings) if (b.type === 'shade' && b.progress == null && b.on) shadeNeed += B.shade.in.water * f * (0.3 + h);
     this.shadeOn = shadeNeed > 0 && (!P.ration || S.res.water > this.C.waterCap * 0.25) && this.drawWater(shadeNeed) >= shadeNeed * 0.9;
 
-    // exposure
+    // ---- exposure
     const curfewOn = P.curfew && h > 0.2;
     const rigShare = S.outdoor > 0 ? Math.min(1, S.rigs / S.outdoor) : 0;
     this.rigShare = rigShare; this.curfewOn = curfewOn;
-    const outExpo = (S.outdoor / pop) * 0.45 * h * (curfewOn ? 0.3 : 1) * (1 - 0.5 * rigShare);
-    const E = this.homeExpo + outExpo + S.thirst * 0.8 + (P.ration ? 0.05 * h : 0) - (P.feast ? 0.03 : 0);
-    this.expo = Math.max(0, E);
-    const e = this.expo;
-    // sickness / recovery / death
+    this.outExpo = (S.outdoor / pop) * 0.45 * h * (curfewOn ? 0.3 : 1) * (1 - 0.5 * rigShare);
+    const e = this.expo = Math.max(0, this.homeExpo + this.outExpo + S.thirst * 0.8 + (P.ration ? 0.05 * h : 0) - (P.feast ? 0.03 : 0));
+
+    // ---- medical care: staffed beds
     const med = this.hasTech('medicine');
-    let medStaff = 0; for (const b of S.buildings) if (b.type === 'medical' && b.progress == null && !b.broken) medStaff += b.staff * (0.5 + 0.5 * b.cond / 100);
-    this.medCover = Math.min(1, medStaff * 30 / pop);
-    const healthy = pop - S.sick;
-    S.acc.sick += healthy * (0.004 + 0.04 * e + 0.15 * e * e + S.hunger * 0.3 + S.thirst * 0.4) * (med ? 0.7 : 1) * f;
-    S.acc.heal += (medStaff * 2.2 * (med ? 1.5 : 1) + S.sick * 0.1 * (e < 0.25 ? 1 : 0.35)) * f;
-    S.acc.death += (S.sick * (0.008 + 0.06 * e + S.thirst * 0.4 + S.hunger * 0.15) * (1 - 0.5 * this.medCover) + pop * (Math.max(0, S.hunger - 0.5) * 0.05 + Math.max(0, S.thirst - 0.4) * 0.12)) * f;
-    while (S.acc.sick >= 1) { S.acc.sick -= 1; if (S.sick < S.pop) S.sick++; }
-    while (S.acc.heal >= 1) { S.acc.heal -= 1; if (S.sick > 0) S.sick--; else S.acc.heal = 0; }
+    let beds = 0, best = 1;
+    for (const b of S.buildings) {
+      if (b.type !== 'medical' || b.progress != null || b.broken || !b.on) continue;
+      const l = this.lvDef(b), sr = b.staff / this.workersOf(b);
+      beds += l.beds * Math.min(1, sr) * (0.5 + 0.5 * b.cond / 100) * (0.65 + 0.35 * Math.min(1, b.sk / (B.medical.skilled || 1)));
+      if ((b.lv || 1) >= 3 && sr > 0) best = 0.65;
+    }
+    beds = Math.floor(beds + 0.001);
+    this.beds = beds; this.inCare = Math.min(S.sick, beds);
+    const untreated = S.sick - this.inCare;
+    this.medCover = Math.min(1, beds / Math.max(1, pop * 0.12));
+    // ---- sickness -> care -> convalescence -> back to work
+    const healthy = Math.max(0, pop - S.sick - S.recov);
+    const sickRate = (0.004 + 0.04 * e + 0.15 * e * e + S.hunger * 0.3 + S.thirst * 0.4 + S.rawDrink * 0.25 + S.cold * 0.02) * (med ? 0.7 : 1);
+    this.sickRate = sickRate;
+    S.acc.sick += healthy * sickRate * f;
+    S.acc.heal += (this.inCare * POP.bedCure * (med ? 1.5 : 1) + untreated * POP.selfCure * (e < 0.25 ? 1 : 0.35)) * f;
+    S.acc.recov += S.recov * POP.convalesce * (0.8 + 0.1 * this.avgTier) * (S.hunger > 0.2 ? 0.5 : 1) * f;
+    const D = 0.008 + 0.06 * e + S.thirst * 0.4 + S.hunger * 0.15;
+    const dUn = untreated * D, dCare = this.inCare * D * 0.3 * best;
+    const dWant = pop * (Math.max(0, S.hunger - 0.5) * 0.05 + Math.max(0, S.thirst - 0.4) * 0.12);
+    S.acc.death += (dUn + dCare + dWant) * f;
+    if (S.dn) { const n = S.dn; n.sickPeak = Math.max(n.sickPeak, S.sick); n.sickDays += S.sick * f; n.bedShort += untreated * f; n.care += this.inCare * f; }
+    while (S.acc.sick >= 1) { S.acc.sick -= 1; if (S.sick + S.recov < S.pop) { S.sick++; S.last.fell = (S.last.fell || 0) + 1; if (S.dn) S.dn.cases++; } }
+    while (S.acc.heal >= 1) { S.acc.heal -= 1; if (S.sick > 0) { S.sick--; S.recov++; } else S.acc.heal = 0; }
+    while (S.acc.recov >= 1) { S.acc.recov -= 1; if (S.recov > 0) { S.recov--; S.last.back = (S.last.back || 0) + 1; } else S.acc.recov = 0; }
     while (S.acc.death >= 1) {
       S.acc.death -= 1;
       if (S.pop > 0) {
         if (S.sick < 1) S.sick = 1;
-        if (this.rand() < S.skilled / S.pop) S.skilled--;
-        S.sick--; S.pop--; S.deaths++; S.dayDeaths++; S.grief = Math.min(32, S.grief + 4);
+        if (this.rand() < S.kids / S.pop) S.kids--; else if (this.rand() < S.skilled / Math.max(1, S.pop - S.kids)) S.skilled--;
+        const un = this.rand() < (dUn + dWant) / Math.max(1e-9, dUn + dCare + dWant);
+        S.sick--; S.pop--; S.deaths++; S.dayDeaths++; S.yr.deaths++; S.grief = Math.min(32, S.grief + 4);
+        if (S.dn) { S.dn.deaths++; if (un) S.dn.untreated++; }
         this.events.push({ type: 'death' });
       }
     }
     if (S.pop <= 3 && !S.over) { S.over = true; this.log('Almond Valley has been abandoned.', 'crit'); this.events.push({ type: 'over' }); }
-    // morale
+
+    // ---- births and growing up
+    const adults = S.pop - S.kids, foodDays = S.res.food / Math.max(1, pop);
+    const room = S.housingCap - S.pop;
+    this.birthFactor = (room > 0 ? 1 : 0.1) * (foodDays > 3 ? 1 : foodDays > 1.5 ? 0.5 : 0) * (S.thirst < 0.05 ? 1 : 0) * clamp((S.morale - 35) / 30, 0, 1.3)
+      * (0.8 + 0.1 * this.avgTier) * (0.8 + 0.3 * this.medCover) * (h > 0.6 ? 0.5 : 1);
+    S.acc.birth += adults * POP.birth * this.birthFactor * f;
+    while (S.acc.birth >= 1) { S.acc.birth -= 1; S.pop++; S.kids++; S.yr.births++; S.last.births = (S.last.births || 0) + 1; }
+    let teachers = 0; for (const b of S.buildings) if (b.type === 'school' && b.progress == null && !b.broken && b.on) teachers += b.staff * (0.65 + 0.35 * Math.min(1, b.sk));
+    this.seats = Math.round(teachers * POP.seatPerTeacher);
+    S.acc.grow += S.kids * POP.mature * f;
+    while (S.acc.grow >= 1) {
+      S.acc.grow -= 1; if (S.kids <= 0) break;
+      S.kids--; S.yr.grown++; S.last.grown = (S.last.grown || 0) + 1;
+      if (this.rand() < Math.min(1, this.seats / Math.max(1, S.kids + 1)) * 0.75) S.skilled++;   // schooled children start skilled
+    }
+    // adult training
+    if (teachers > 0 && S.skilled < Math.floor(adults * 0.5)) { S.acc.edu += teachers * 0.25 * (this.hasTech('apprentice') ? 1.5 : 1) * f; while (S.acc.edu >= 1) { S.acc.edu -= 1; S.skilled++; } }
+    S.skilled = clamp(S.skilled, 0, Math.max(0, S.pop - S.kids));
+
+    // ---- morale
     let market = 0, bet = 0, office = 0;
     for (const b of S.buildings) {
       if (b.progress != null || b.broken) continue;
       const sr = B[b.type].workers ? b.staff / this.workersOf(b) : 0;
       if (b.type === 'market') market += sr * 60; else if (b.type === 'betting') bet += sr * 90; else if (b.type === 'office') office = sr;
     }
-    const foodDays = S.res.food / Math.max(1, pop);
+    const jobless = S.able > 0 ? Math.max(0, S.idle - (this.sites && this.sites.length ? 6 : 0) - 4) / S.able : 0;
     const m = this.moraleParts = {
       Base: 50,
       Housing: this.houseMorale,
       Food: S.hunger > 0.05 ? -25 * S.hunger : foodDays > 4 ? 5 : foodDays > 1.5 ? 0 : -6,
-      Water: -30 * S.thirst + (P.ration ? -6 : 0),
+      Water: -30 * S.thirst + (P.ration ? -6 : 0) - 10 * S.rawDrink,
+      Fuel: -6 * S.cold,
       Market: 6 * Math.min(1, market / pop),
       'Betting Hall': 5 * Math.min(1, bet / pop),
-      Health: -25 * S.sick / pop,
+      Health: -25 * (S.sick + 0.3 * S.recov) / pop + 3 * this.medCover,
       Heat: -12 * Math.min(1.2, e),
       Grief: -S.grief,
       Homeless: -35 * S.homeless / pop,
+      'No work': -18 * jobless,
       Policies: (P.feast ? 6 : 0) + (curfewOn ? 2 : 0) + office * 3,
     };
     let target = 0; for (const k in m) target += m[k];
@@ -712,27 +819,24 @@ export class Sim {
     this.moraleTarget = target;
     this.workMult = (0.8 + 0.4 * S.morale / 100) * (1 + this.houseEff) * (1 + 0.08 * office) * (S.hunger > 0.3 ? 0.8 : 1);
     S.grief = Math.max(0, S.grief - S.grief * 0.08 * f - 0.3 * f);
-    // education
-    let teachers = 0; for (const b of S.buildings) if (b.type === 'school' && b.progress == null && !b.broken) teachers += b.staff;
-    if (teachers > 0 && S.skilled < Math.floor(S.pop * 0.5)) { S.acc.edu += teachers * 0.45 * (this.hasTech('apprentice') ? 1.5 : 1) * f; while (S.acc.edu >= 1) { S.acc.edu -= 1; S.skilled++; } }
-    S.skilled = clamp(S.skilled, 0, S.pop);
   }
 
   outMult(b) {
     const t = b.type; let m = 1;
     const info = this.C.info[b.id];
-    if (B[t].node) m *= info.rich || 0;
+    if (B[t].node) m *= (info.rich || 0) * (info.node ? this.nodeFactor(info.node) : 1);
     if (this.hasTech('tools') && (t === 'hunter' || t === 'lumber' || t === 'quarry' || t === 'mine')) m *= 1.15;
     if (this.hasTech('irrigation') && t === 'farm') m *= 1.2;
     if (this.hasTech('automation') && (t === 'workshop' || t === 'mine')) m *= 1.2;
-    if (t === 'hunter' && this.S.zones.north) m *= 1.4;
+    if (t === 'hunter') m *= this.gameFactor();
     return m * this.lvMul(b, 'out');
   }
-  inRate(b, r) { let v = B[b.type].in[r] * (B[b.type].housing ? 1 : this.lvMul(b, 'out')); if (b.type === 'farm' && r === 'water' && this.hasTech('irrigation')) v *= 0.5; return v; }
+  inRate(b, r) { let v = B[b.type].in[r] * (B[b.type].housing ? 1 : this.lvMul(b, 'out')); if (b.type === 'farm' && r === 'water') v *= (this.hasTech('irrigation') ? 0.5 : 1) * (1 + 0.8 * Math.min(1, this.h)); return v; }
   bufCap(b, r) { return Math.max(20, B[b.type].out[r] * this.outMult(b) * 1.5); }
 
   _production(dt) {
     const S = this.S, f = dt / 24, h = Math.min(1, this.h);
+    let reclaim = 0, effSum = 0, effN = 0;
     for (const b of S.buildings) {
       const def = B[b.type];
       if (def.housing || def.unique || b.type === 'shade') {
@@ -752,8 +856,10 @@ export class Sim {
         e *= r;
         if (def.skilled) {
           const sr = b.sk / def.skilled;
-          if (sr <= 0) { b.eff = 0; b.issue = 'Needs skilled workers'; continue; }
-          e *= 0.25 + 0.75 * sr; if (sr < 1) issue = 'Needs more skilled workers';
+          if (def.strictSkill) {
+            if (sr <= 0) { b.eff = 0; b.issue = 'Needs skilled workers'; continue; }
+            e *= 0.25 + 0.75 * sr; if (sr < 1) issue = 'Needs more skilled workers';
+          } else { e *= 0.65 + 0.35 * sr; if (sr < 1) issue = 'No skilled hand (−' + Math.round(35 * (1 - sr)) + '%)'; }
         }
         e *= this.workMult;
       }
@@ -763,6 +869,7 @@ export class Sim {
         e *= this.powerRatio;
       }
       e *= 0.5 + 0.5 * b.cond / 100;
+      if (def.tool) { if (S.res.parts < def.tool * f) { e *= 0.6; issue = 'No spare parts for tooling'; } else this.add('parts', -def.tool * f); }
       if (def.outdoor) { e *= 1 - 0.3 * h; if (this.curfewOn) e *= 0.7; e *= 1 + 0.25 * (this.rigShare || 0); }
       if (def.wantsWater && !info.watered) { e *= 0.4; issue = 'Off the water network'; }
       // inputs
@@ -782,11 +889,17 @@ export class Sim {
         if (want > 0 && cur + want > cap) { fac = Math.min(fac, Math.max(0, (cap - cur) / want)); if (cap - cur < want * 0.5) issue = 'Output full — needs hauling'; }
       }
       e *= fac;
+      if (def.node && info.node && this.nodeFactor(info.node) < 0.5) issue = issue || (def.node === 'forest' ? 'Timber stand over-cut' : 'Deposit running out');
+      if (b.type === 'hunter' && this.gameFactor() < 0.6) issue = issue || 'Game is scarce — over-hunted';
       if (def.in) for (const r in def.in) { const need = this.inRate(b, r) * e * f; if (r === 'water') this.drawWater(need); else this.add(r, -need); }
       if (def.out) for (const r in def.out) {
         const amt = def.out[r] * mult * e * f;
         if (r === 'scrip') this.add('scrip', amt); else b.out[r] = (b.out[r] || 0) + amt;
+        if (def.node && info.node && S.nodes[info.node.id] !== Infinity) S.nodes[info.node.id] = Math.max(0, (S.nodes[info.node.id] ?? nodeCap(info.node)) - amt);
+        if (b.type === 'hunter') S.game = Math.max(0, S.game - amt);
       }
+      if (b.type === 'reclaim') reclaim += 0.22 * e;
+      if (def.workers && (def.out || def.gen)) { effSum += e; effN++; }
       // carriers walk goods to storage
       if (def.out) for (const r in def.out) {
         if (r === 'scrip' || !b.out[r]) continue;
@@ -809,6 +922,13 @@ export class Sim {
         }
       }
     }
+    this.reclaimShare = Math.min(0.5, reclaim);
+    this.meanEff = effN ? effSum / effN : 1;
+    // spring output is the yardstick the summer is measured against
+    if (!S.dn && this.h < 0.1) S.effBase = Math.max(0.4, S.effBase + (this.meanEff - S.effBase) * (1 - Math.exp(-dt / 48)));
+    if (S.dn) { const n = S.dn, hrs = dt; n.hours += hrs; n.effSum += this.meanEff * hrs; n.unfilled += S.unfilled * hrs / 24; n.lostWork += (S.sickA + S.recovA) * hrs / 24;
+      if (this.curfewOn) n.curfewH += hrs; if (S.policies.ration) n.rationH += hrs; n.protSum += (1 - (this.h > 0 ? this.homeExpo / this.h : 0)) * hrs; n.rigSum += (this.rigShare || 0) * hrs;
+      n.minWater = Math.min(n.minWater, S.res.water / this.C.waterCap); n.thirstH += S.thirst > 0.1 ? hrs : 0; n.rawH += S.rawDrink > 0.05 ? hrs : 0; n.peakT = Math.max(n.peakT, this.T); }
   }
 
   _wear(dt) {
@@ -824,6 +944,7 @@ export class Sim {
     for (const c in hw.cond) {
       let w = hwWear;
       if ((c === 'turA' || c === 'turB') && hw.coolant <= 1) w *= 3;
+      if (c === 'drill' || c === 'pump') w *= 0.55 + 0.75 * (this.hwLoad ?? 0.6);   // running the well hard wears it faster
       hw.cond[c] = Math.max(0, hw.cond[c] - w);
     }
     // utility depot crews: global repair pool on the worst item
@@ -1055,26 +1176,45 @@ export class Sim {
     const sn = this.seasonName();
     if (sn !== S.season) {
       const prev = S.season; S.season = sn;
-      if (sn === 'Double Noon') this.log(`Double Noon has begun. Both suns stand overhead.`, 'crit');
+      if (sn === 'Double Noon') { this._dnStart(); this.log(`Double Noon has begun. Both suns stand overhead.`, 'crit'); }
       else if (sn === 'High Summer') this.log('High Summer. The heat is climbing toward Double Noon.', 'warn');
-      else if (prev === 'Double Noon') { S.summers++; this.log(`Double Noon has passed. The valley endured its ${ord(S.summers)} summer.`, 'good'); this._objectives(); }
+      else if (prev === 'Double Noon') { S.summers++; this.log(`Double Noon has passed. The valley endured its ${ord(S.summers)} summer.`, 'good'); this._dnEnd(); this._objectives(); }
       else this.log(`${sn} has arrived.`, 'info');
       this.events.push({ type: 'season', name: sn });
     }
-    // train
+    // deposits: timber regrows, herds recover
+    const f = dt / 24;
+    for (const nd of NODES) {
+      const k = NODE_STOCK[nd.type]; if (!k.regen) continue;
+      const cap = nodeCap(nd), st = S.nodes[nd.id] ?? cap;
+      S.nodes[nd.id] = Math.min(cap, st + (k.regen * st * (1 - st / cap) + cap * 0.002) * f);
+    }
+    { const cap = this.gameCap(); S.game = Math.min(cap, S.game + (GAME.regen * S.game * (1 - S.game / cap) + cap * 0.003) * f); }
+    // train: freight, settlers arriving, and people giving up
     if (S.time >= S.train.next) {
       S.train.at = S.train.next; S.train.next += 48;
       let depots = 0; for (const b of S.buildings) if (b.type === 'depot' && b.progress == null && b.staff > 0) depots++;
       S.trade.cargo = 40 + depots * 160;
-      const free = S.housingCap - S.pop;
-      if (S.morale >= 48 && free > 0 && S.res.food > S.pop * 4 && S.thirst < 0.2) {
-        const n = Math.min(free, 1 + Math.floor((S.morale - 48) / 10) + depots);
-        S.pop += n; for (let i = 0; i < n; i++) if (this.rand() < 0.2) S.skilled++;
-        this.log(`The High Noon train brought ${n} new settler${n > 1 ? 's' : ''}.`, 'good');
-      } else if (S.morale < 22 && S.pop > 8) {
-        const n = Math.min(S.pop - 8, 1 + Math.floor((22 - S.morale) / 8));
-        S.pop -= n; S.sick = Math.min(S.sick, S.pop); S.skilled = Math.min(S.skilled, S.pop);
-        this.log(`${n} resident${n > 1 ? 's' : ''} gave up and left on the train.`, 'warn');
+      for (const r in S.trade.px) S.trade.px[r] = 1 + (S.trade.px[r] - 1) * 0.6;   // prices drift back between trains
+      const pros = this.prosperity().score, free = S.housingCap - S.pop;
+      let leave = 0, why = '';
+      if (S.morale < 25) { leave += 1 + Math.ceil(S.pop * 0.12 * (25 - S.morale) / 25); why = S.thirst > 0.2 ? 'there is no water' : S.hunger > 0.2 ? 'there is no food' : 'morale has collapsed'; }
+      if (S.homeless > 2) { leave += Math.ceil(S.homeless / 3); why = why || 'there is no roof for them'; }
+      if (S.idle > Math.max(6, S.able * 0.25) && !(this.sites && this.sites.length)) { leave += Math.floor(S.idle / 4); why = why || 'there is no work'; }
+      if (leave > 0 && S.pop > 8) {
+        const n = Math.min(S.pop - 8, leave), k = Math.min(S.kids, Math.round(n * S.kids / S.pop));
+        S.pop -= n; S.kids -= k; S.sick = Math.min(S.sick, S.pop); S.recov = Math.min(S.recov, S.pop - S.sick); S.skilled = Math.min(S.skilled, S.pop - S.kids);
+        S.yr.left += n;
+        this.log(`${n} resident${n > 1 ? 's' : ''} left on the train: ${why}.`, 'warn');
+      } else if (pros >= 45 && free > 0 && S.thirst < 0.2 && S.hunger < 0.1 && !S.policies.closed) {
+        // settlers come for a roof and for work; a prosperous valley draws more of them
+        let n = clamp(Math.round((pros - 42) / 14), 0, 3) + Math.min(1, depots);
+        n = Math.max(0, Math.min(n, free, Math.max(1, S.unfilled + 2 - S.idle)));
+        if (n > 0) {
+          let k = 0, sk = 0; for (let i = 0; i < n; i++) { if (this.rand() < 0.25) k++; else if (this.rand() < 0.2) sk++; }
+          S.pop += n; S.kids += k; S.skilled += sk; S.yr.arrived += n; S.last.arrived = (S.last.arrived || 0) + n;
+          this.log(`The High Noon train brought ${n} new settler${n > 1 ? 's' : ''}${k ? ` (${k} ${k > 1 ? 'children' : 'child'})` : ''}.`, 'good');
+        }
       }
       this.events.push({ type: 'train' });
     }
@@ -1105,81 +1245,27 @@ export class Sim {
     // breakdowns
     for (const b of S.buildings) {
       if (b.progress != null || b.broken || !B[b.type].wear || B[b.type].housing) continue;
-      if (b.cond < 30 && this.rand() < (30 - b.cond) / 30 * 0.6) { b.broken = true; this.dirty = true; this.log(`${B[b.type].name} has broken down.`, 'warn'); this.events.push({ type: 'broke', id: b.id }); }
+      if (b.cond < 30 && this.rand() < (30 - b.cond) / 30 * 0.6) { b.broken = true; this.dirty = true; if (S.dn) S.dn.breaks++; this.log(`${B[b.type].name} has broken down.`, 'warn'); this.events.push({ type: 'broke', id: b.id }); }
     }
     for (const c in hw.cond) {
-      if (!hw.broken[c] && hw.cond[c] < 30 && this.rand() < (30 - hw.cond[c]) / 30 * 0.6) { hw.broken[c] = true; this.log(`Heartwell failure: ${HW.comps[c]} is down.`, 'crit', true); this.events.push({ type: 'broke', id: this.C.hw.id }); }
+      if (!hw.broken[c] && hw.cond[c] < 30 && this.rand() < (30 - hw.cond[c]) / 30 * 0.6) { hw.broken[c] = true; if (S.dn) S.dn.breaks++; this.log(`Heartwell failure: ${HW.comps[c]} is down.`, 'crit', true); this.events.push({ type: 'broke', id: this.C.hw.id }); }
     }
-    S.hist.push({ d: this.day(), t: Math.round(seasonTemp(this.doy(), this.year())), w: Math.round(S.res.water), f: Math.round(S.res.food), p: S.pop, m: Math.round(S.morale), x: S.deaths });
+    for (const b of S.buildings) { const def = B[b.type]; if (def.node && this.C.info[b.id]) this.C.info[b.id].node = this.pickNode(def.node, footprint(b)); }
+    this._digest();
+    if (this.doy() < 1 && S.yr.y !== this.year()) { S.yrPrev = S.yr; S.yr = { y: this.year(), births: 0, arrived: 0, left: 0, deaths: 0, grown: 0 }; }
+    if (S.dn) this.log(`Double Noon, day ${Math.min(10, Math.floor(this.doy() - 20) + 1)} of 10: ${S.sick} sick (${this.inCare} in beds), reserve ${Math.round(S.res.water / this.C.waterCap * 100)}%, aquifer ${Math.round(this.aqLevel() * 100)}%.`, 'info');
+    S.hist.push({ d: this.day(), t: Math.round(seasonTemp(this.doy(), this.year())), w: Math.round(S.res.water), f: Math.round(S.res.food), p: S.pop, m: Math.round(S.morale), x: S.deaths, a: Math.round(this.aqLevel() * 100), s: S.sick + S.recov, pr: Math.round(this.prosperity().score) });
     if (S.hist.length > 120) S.hist.shift();
     this._objectives();
     this.events.push({ type: 'day' });
   }
 
-  // ------------------------------------------------------------------ objectives & alerts
-  objectives() {
-    const S = this.S, c = t => this.count(t);
-    const startHomes = 11;
-    const homes = S.buildings.filter(b => B[b.type].housing && b.progress == null).length;
-    const list = [
-      { id: 'homes', name: 'Shelter the Valley', desc: 'Build 2 new homes', cur: Math.max(0, homes - startHomes), max: 2, reward: { wood: 60 } },
-      { id: 'study', name: 'Study the Heat', desc: 'Research Insulated Homes', cur: S.tech.done.insulation ? 1 : 0, max: 1, reward: { stone: 60 } },
-      { id: 'medic', name: 'Tend the Sick', desc: 'Build a Medical Post', cur: c('medical'), max: 1, reward: { food: 80 } },
-      { id: 'insul', name: 'Expand Housing', desc: 'Have 4 Insulated Homes or better', cur: c('insulated') + c('climate'), max: 4, reward: { parts: 20 } },
-      { id: 'valve', name: 'Expand the Valve Network', desc: 'Build a Valve Station on a water main', cur: c('valve'), max: 1, reward: { metal: 40 } },
-      { id: 'noon1', name: 'Prepare for Double Noon', desc: 'Survive the first Double Noon', cur: S.summers, max: 1, reward: { scrip: 150 } },
-      { id: 'claim', name: 'Into the Canyon', desc: 'Survey and claim a new district', cur: Object.keys(S.zones).length - 1, max: 1, reward: { wood: 80, stone: 80 } },
-      { id: 'mine', name: 'Iron in the East', desc: 'Operate an Iron Mine', cur: c('mine'), max: 1, reward: { parts: 25 } },
-      { id: 'deep', name: 'Deepen the Heartwell', desc: 'Raise any Heartwell system to level 2', cur: Math.max(...Object.values(S.hw.lv)) - 1, max: 1, reward: { metal: 60 } },
-      { id: 'fleet', name: 'The Automation Fleet', desc: 'Manufacture a Clicker', cur: S.madeClickers || 0, max: 1, reward: { aether: 25 } },
-      { id: 'aether', name: 'Bottled Lightning', desc: 'Operate an Aether Plant', cur: c('refinery'), max: 1, reward: { scrip: 200 } },
-      { id: 'climate', name: 'Climate Residences', desc: 'Build 2 Climate Residences', cur: c('climate'), max: 2, reward: { scrip: 250 } },
-      { id: 'pop', name: 'A Living Civilization', desc: 'Reach a population of 120', cur: S.pop, max: 120, reward: { scrip: 300 } },
-      { id: 'noon3', name: 'Three Summers', desc: 'Survive three Double Noons', cur: S.summers, max: 3, reward: { scrip: 500 } },
-    ];
-    return list;
-  }
-  _objectives() {
-    const S = this.S;
-    let shown = 0;
-    for (const o of this.objectives()) {
-      if (S.obj[o.id]) continue;
-      if (++shown > 3) break;
-      if (o.cur >= o.max) {
-        S.obj[o.id] = true;
-        for (const k in o.reward) S.res[k] = Math.min(this.cap(k), S.res[k] + o.reward[k]);
-        this.log(`Objective complete: ${o.name}. Reward: ${costText(o.reward)}.`, 'good');
-        this.events.push({ type: 'objective', id: o.id });
-      }
-    }
-  }
-  alerts() {
-    const S = this.S, out = [], hw = S.hw;
-    const wp = S.res.water / this.C.waterCap;
-    if (S.thirst > 0.1) out.push({ sev: 'crit', msg: 'Residents are going thirsty', go: 'heartwell' });
-    else if (wp < 0.25) out.push({ sev: 'crit', msg: `Low water reserve (${Math.round(wp * 100)}%)`, go: 'heartwell' });
-    else if (wp < 0.6 && S.flow.water < -20) out.push({ sev: 'warn', msg: 'Water reserves declining', go: 'heartwell' });
-    if (S.hunger > 0.1) out.push({ sev: 'crit', msg: 'Residents are starving', go: 'storage' });
-    else if (S.res.food < S.pop * 2) out.push({ sev: 'warn', msg: 'Rations running low', go: 'storage' });
-    for (const c in hw.broken) out.push({ sev: 'crit', msg: `${HW.comps[c]} is down`, go: 'heartwell' });
-    if (S.sick >= Math.max(4, S.pop * 0.12)) out.push({ sev: S.sick > S.pop * 0.3 ? 'crit' : 'warn', msg: `${S.sick} residents heat-sick`, go: 'people' });
-    if (S.homeless > 0) out.push({ sev: 'warn', msg: `${S.homeless} homeless residents`, go: 'build' });
-    const broken = S.buildings.filter(b => b.broken);
-    if (broken.length) out.push({ sev: 'warn', msg: `${broken.length} building${broken.length > 1 ? 's' : ''} broken down`, go: 'b' + broken[0].id });
-    if (this.powerRatio < 0.95) out.push({ sev: 'warn', msg: 'Power shortage', go: 'production' });
-    if (this.hwPower < 0.95) out.push({ sev: 'crit', msg: 'Heartwell underpowered', go: 'heartwell' });
-    if (S.res.aether <= 0 && S.clickers.length) out.push({ sev: 'warn', msg: 'Clickers dormant — no aether', go: 'storage' });
-    if (S.res.parts < 2 && (S.buildings.some(b => b.cond < 50 && b.progress == null))) out.push({ sev: 'warn', msg: 'No parts for repairs', go: 'storage' });
-    if (S.idle >= 5 && !(this.sites && this.sites.length)) out.push({ sev: 'info', msg: `${S.idle} unassigned workers`, go: 'people' });
-    const dn = this.daysToDoubleNoon();
-    if (dn > 0 && dn <= 8) out.push({ sev: 'warn', msg: `Double Noon in ${Math.ceil(dn)} day${Math.ceil(dn) > 1 ? 's' : ''}`, go: 'people' });
-    return out;
-  }
-
   serialize() { return JSON.stringify(this.S); }
 }
 
-function ord(n) { return n === 1 ? 'first' : n === 2 ? 'second' : n === 3 ? 'third' : n + 'th'; }
+Object.assign(Sim.prototype, civ);
+
+export function ord(n) { return n === 1 ? 'first' : n === 2 ? 'second' : n === 3 ? 'third' : n + 'th'; }
 
 function migrate(S) {
   const base = newState();
@@ -1192,5 +1278,15 @@ function migrate(S) {
   if (!(S.v >= 2)) { if (![0, 1, 2, 4].includes(S.speed)) S.speed = 1; S.v = 2; }
   // v3: per-building upgrade levels; research now comes from buildings (with a fallback when there are none)
   if (!(S.v >= 3)) { for (const b of S.buildings) b.lv = b.lv || 1; S.v = 3; }
+  // v4: explicit children and convalescents, deposits with reserves, the aquifer, charter ranks
+  if (!(S.v >= 4)) {
+    S.kids = Math.round(S.pop * 0.15); S.recov = 0; S.skilled = Math.min(S.skilled, S.pop - S.kids);
+    for (const k in base.acc) if (S.acc[k] === undefined) S.acc[k] = 0;
+    S.hw.aq = AQ.max * (1 + AQ.deepBonus * (S.hw.lv.ext - 1)) * AQ.start;
+    S.trade.px = {}; S.nodes = base.nodes; S.game = base.game;
+    S.rank = 0; S.tasks = {};
+    S.v = 4;
+  }
+  for (const nd of NODES) if (S.nodes[nd.id] == null) S.nodes[nd.id] = nodeCap(nd);
   return S;
 }

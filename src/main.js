@@ -149,6 +149,8 @@ window.addEventListener('pagehide', () => game.save());
 function handleEvents() {
   const ev = game.sim.events; if (!ev.length) return;
   for (const e of ev) {
+    if (e.type === 'report') { game.setSpeed(0); ui.open('report'); }
+    if (e.type === 'rank') ui.banner(e.name, 'Almond Valley has grown');
     if (e.type === 'log') {
       ui.toast(e.msg, e.kind);
       // critical decisions pause the valley; other warnings drop fast-forward back to normal speed
