@@ -25,6 +25,7 @@ const game = {
   setOverlay(m) { this.view.setOverlay(m); },
   setShadows(on) { this.view.setShadows(on); setPref('shadows', on); },
   setClickerModel(m) { this.view.setClickerModel(m); setPref('clickerModel', m); },
+  setBuildingModels(m) { this.view.setBuildingModels(m); setPref('buildingModels', m); },
   setQuality(q) {
     this.quality = q; setPref('quality', q);
     const dpr = window.devicePixelRatio || 1;
@@ -110,6 +111,7 @@ const view = game.view = new View(canvas, sim);
 const P = prefs();
 if (P.shadows != null) view.setShadows(P.shadows);
 view.setClickerModel(new URLSearchParams(location.search).get('clicker') || P.clickerModel || 'new');
+view.setBuildingModels(new URLSearchParams(location.search).get('buildings') || P.buildingModels || 'new');
 game.setQuality(P.quality || (view.mobile ? 'med' : 'high'));
 const ui = game.ui = new UI(game);
 

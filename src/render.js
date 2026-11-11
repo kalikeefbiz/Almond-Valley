@@ -4,6 +4,7 @@ import { N, CELL, B, ZONES, NODES, NODE_RANGE, HW, CLICKERS } from './data.js';
 import { footprint, cellZone } from './sim.js';
 import { World, cellToWorld, HALF, worldToCell, terrainH } from './world.js';
 import { loadMasterClicker, poseMasterClicker } from './clickerModel.js';
+import { MODEL_TYPES, loadBuildingModel } from './buildingModels.js';
 import { makeMaterial, buildingGeometry, heartwellGeometry, clickerGeometry, personGeometry, PAL } from './models.js';
 
 const _v = new THREE.Vector3(), _d = new THREE.Object3D(), _col = new THREE.Color();
@@ -126,13 +127,24 @@ export class View {
 
   // ---------------------------------------------------------------- sync with sim
   geoFor(type) { return this.geo[type] || (this.geo[type] = buildingGeometry(type)); }
+  // Building model test: 'new' uses the Meshy models where they exist, 'classic' the built-in shapes.
+  setBuildingModels(mode) {
+    this.buildingModels = mode; this.bmod = this.bmod || {}; this.seenVersion = -1;
+    if (mode !== 'new') return;
+    for (const t of MODEL_TYPES) if (!this.bmod[t]) {
+      this.bmod[t] = 'loading';
+      loadBuildingModel(t).then(m => { m.geo.userData.smoke = this.geoFor(t).userData.smoke; this.bmod[t] = m; this.seenVersion = -1; })
+        .catch(err => { console.warn(`${t} model failed to load; using built-in shapes.`, err); this.bmod[t] = 'failed'; });
+    }
+  }
+  modelFor(type) { const m = this.buildingModels === 'new' && this.bmod && this.bmod[type]; return m && m.geo ? m : null; }
   sync() {
     const sim = this.sim, S = sim.S;
     this.seenVersion = sim.version;
     const seen = new Set();
     for (const b of S.buildings) {
       seen.add(b.id);
-      const key = b.type + ':' + b.rot + ':' + b.x + ':' + b.z + (b.type === 'heartwell' ? JSON.stringify(S.hw.lv) : '');
+      const key = b.type + ':' + b.rot + ':' + b.x + ':' + b.z + (b.type === 'heartwell' ? JSON.stringify(S.hw.lv) : '') + (this.modelFor(b.type) ? ':m' : '');
       let e = this.bm.get(b.id);
       if (!e || e.key !== key) { if (e) this._dropB(e); e = this._makeB(b, key); this.bm.set(b.id, e); }
       e.b = b;
@@ -188,7 +200,8 @@ export class View {
       const basins = [-1, 1].map(s => { const g = new THREE.PlaneGeometry(4.5, 2.2); g.rotateX(-Math.PI / 2); const m = new THREE.Mesh(g, bm2); m.position.set(s * 5.3, 0.5, 0); group.add(m); return m; });
       e.hw = { wheels, pools, basins, mats: [wm, bm2], spin: [0, 0] };
     } else geo = this.geoFor(b.type);
-    const mesh = new THREE.Mesh(geo, this.mat);
+    const model = b.type !== 'heartwell' && this.modelFor(b.type); if (model) geo = model.geo;
+    const mesh = new THREE.Mesh(geo, model ? model.material : this.mat);
     mesh.rotation.y = b.rot * Math.PI / 2; mesh.castShadow = true; mesh.receiveShadow = true;
     mesh.userData.bid = b.id;
     group.add(mesh); e.mesh = mesh;

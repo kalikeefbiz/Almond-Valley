@@ -97,6 +97,7 @@ export class UI {
       case 'newgame': if (this.confirm === 'new') { this.confirm = null; g.reset(); } else this.confirm = 'new'; break;
       case 'shadows': g.setShadows(!g.view.shadows); break;
       case 'cmodel': g.setClickerModel(x); this.refresh(true); break;
+      case 'bmodel': g.setBuildingModels(x); this.refresh(true); break;
       case 'quality': g.setQuality(x); break;
       case 'help': this.help(); break;
       case 'modal-x': this.el.modal.classList.remove('open'); if (x === 'resume') g.setSpeed(g.lastSpeed || 1); break;
@@ -457,6 +458,7 @@ export class UI {
       <div class="rowl"><div class="nm"><b>Resolution</b><small>${g.fps ? Math.round(g.fps) + ' frames per second' : ''}</small></div><button class="btn sm ${g.quality === 'low' ? 'pri' : ''}" data-a="quality:low">Low</button><button class="btn sm ${g.quality === 'med' ? 'pri' : ''}" data-a="quality:med">Medium</button><button class="btn sm ${g.quality === 'high' ? 'pri' : ''}" data-a="quality:high">High</button></div>
       <div class="sec">Model test</div>
       <div class="rowl"><div class="nm"><b>Master Clicker</b><small>Compare the Meshy model with the built-in shapes</small></div>${[['new', 'New'], ['pbr', 'Metal'], ['classic', 'Old']].map(([k, n]) => `<button class="btn sm ${g.view.clickerModel === k ? 'pri' : ''}" data-a="cmodel:${k}">${n}</button>`).join('')}</div>
+      <div class="rowl"><div class="nm"><b>Buildings</b><small>Workshop, Smokehouse, Market, Warehouse, Fabrication Plant</small></div>${[['new', 'New'], ['classic', 'Old']].map(([k, n]) => `<button class="btn sm ${g.view.buildingModels === k ? 'pri' : ''}" data-a="bmodel:${k}">${n}</button>`).join('')}</div>
       <div class="sec">Game</div>
       <div class="btns"><button class="btn" data-a="help">How to play</button><button class="btn red" data-a="newgame">${this.confirm === 'new' ? 'Tap again — this erases your valley' : 'New game'}</button></div>
       <p class="desc" style="margin-top:10px">Almond Valley · an Ashes × Aether settlement builder by BlackHouse.</p>` };
