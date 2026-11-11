@@ -206,7 +206,7 @@ export class World {
     this.sun.position.set(target.x + sx * 120, target.y + sy * 160, target.z - 70 + (day < 0.5 ? 140 : 0));
     this.sun.color.set(0x8fa4ff).lerp(_c.set(0xffe9c8), day).lerp(_c.set(0xffb070), Math.max(dusk * 0.7, heat * 0.35 * day));
     this.sun.intensity = 0.95 + day * (1.25 + dn * 0.45);
-    this.hemi.intensity = 1.2 + day * 0.3;
+    this.hemi.intensity = 1.55 + day * -0.05;
     this.hemi.color.set(0x7888d8).lerp(_c.set(0xffe6c8), day);
     this.hemi.groundColor.set(0x43365a).lerp(_c.set(0x9a6a48), day);
     glowUniform.value = 1.5 - day * 1.15;

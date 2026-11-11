@@ -970,14 +970,14 @@ export class Sim {
       for (const b of (this.sites || [])) if (free('build', b.id, '', 2)) return take('build', b.id);
     }
     if (def.repair) {
-      const thr = role === 'master' ? 55 : 82;
+      const thr = role === 'master' ? 66 : 82;
       let best = null, bc = thr, comp = null;
       for (const k in S.hw.cond) if (S.hw.cond[k] < bc - 4 && free('repair', this.C.hw.id, k)) { bc = S.hw.cond[k] + 4; best = this.C.hw; comp = k; }
       for (const b of S.buildings) if (b.progress == null && B[b.type].wear && (b.cond < bc || (b.broken && bc > 0)) && free('repair', b.id)) { bc = b.broken ? -1 : b.cond; best = b; comp = null; }
       if (best && S.res.parts > 1) return take('repair', best.id, comp);
     }
     if (def.load) {
-      let best = null, bf = role === 'master' ? 0.5 : 0.2;
+      let best = null, bf = role === 'master' ? 0.3 : 0.2;
       for (const b of S.buildings) {
         const d = B[b.type]; if (!d.out || b.progress != null) continue;
         let fill = 0, tot = 0;

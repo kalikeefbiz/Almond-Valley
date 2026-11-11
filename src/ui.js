@@ -139,6 +139,8 @@ export class UI {
   // ---------------------------------------------------------------- refresh
   tick(dt) { this.timer -= dt; if (this.timer <= 0) { this.timer = 0.25; this.refresh(false); } }
   refresh(force) {
+    // Keep the objectives column clear of the HUD however the top rows wrap (phone landscape wraps to two lines).
+    const tb = Math.round(document.getElementById('top').getBoundingClientRect().bottom) + 6; if (tb !== this._tb) { this._tb = tb; this.el.left.style.top = tb + 'px'; }
     const sim = this.sim, S = sim.S, g = this.g, el = this.el;
     // speed
     this.set(el.speed, [[0, 'pause'], [1, 'play'], [2, 'ff'], [4, 'fff']].map(([s, i]) => `<button data-a="speed:${s}" class="${g.speed === s ? 'on' : ''}" aria-label="speed ${s}">${ic(i)}</button>`).join(''));
@@ -158,7 +160,7 @@ export class UI {
     const T = sim.T, hr = sim.hour(), doy = sim.doy();
     const hot = sim.h > 0.45;
     el.clim.classList.toggle('hot', hot);
-    this.set(el.clim, `<span style="color:${hot ? '#ff8a5a' : '#ffd24a'}">${ic('temp')}</span><span class="tval">${Math.round(T)}°C</span><span style="color:#ffd24a">${ic('sun')}</span><span class="sea">${sim.seasonName()}</span><span class="day">Day ${sim.day() + 1} · ${String(Math.floor(hr)).padStart(2, '0')}:${String(Math.floor((hr % 1) * 6) * 10).padStart(2, '0')}</span><i class="yr"></i><i class="yrm" style="left:${(doy / YEAR * 100).toFixed(1)}%"></i>`);
+    this.set(el.clim, `<span style="color:${hot ? '#ff8a5a' : '#ffd24a'}">${ic('temp')}</span><span class="tval">${Math.round(T)}°C</span><span style="color:#ffd24a">${ic('sun')}</span><span class="sea">${sim.seasonName()}</span><span class="day">D<span class="dw">ay </span>${sim.day() + 1} · ${String(Math.floor(hr)).padStart(2, '0')}:${String(Math.floor((hr % 1) * 6) * 10).padStart(2, '0')}</span><i class="yr"></i><i class="yrm" style="left:${(doy / YEAR * 100).toFixed(1)}%"></i>`);
     this.set(el.popc, `<span style="color:var(--gold)">${ic('people')}</span>${S.pop}<small>/ ${S.housingCap}</small>`);
     el.heatfx.style.opacity = Math.max(0, Math.min(0.55, (sim.h - 0.35) * 0.6 * (g.view.env.day || 0)));
     // objectives

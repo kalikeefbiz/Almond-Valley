@@ -16,6 +16,8 @@ export class View {
     const mobile = matchMedia('(pointer: coarse)').matches;
     this.mobile = mobile;
     const r = this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance', alpha: false });
+    // iOS can drop the GL context when the tab is backgrounded; let three.js rebuild it instead of staying black.
+    canvas.addEventListener('webglcontextlost', e => e.preventDefault());
     r.toneMapping = THREE.ACESFilmicToneMapping; r.toneMappingExposure = 1.0;
     r.shadowMap.type = THREE.PCFSoftShadowMap;
     this.pixelRatio = Math.min(window.devicePixelRatio || 1, mobile ? 1.6 : 2);
@@ -64,7 +66,7 @@ export class View {
     m.position.y = 0.12; m.renderOrder = 2; m.visible = false; this.scene.add(m); this.ovMesh = m;
   }
   _ghost() {
-    this.ghostMat = new THREE.MeshBasicMaterial({ color: 0x44ff88, transparent: true, opacity: 0.55, depthWrite: false });
+    this.ghostMat = new THREE.MeshBasicMaterial({ color: 0x44ff88, transparent: true, opacity: 0.72, depthWrite: false });
     this.ghost = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), this.ghostMat); this.ghost.visible = false; this.ghost.renderOrder = 5; this.scene.add(this.ghost);
     this.ghostPad = new THREE.Mesh(new THREE.BoxGeometry(1, 0.1, 1), new THREE.MeshBasicMaterial({ color: 0x44ff88, transparent: true, opacity: 0.35, depthWrite: false }));
     this.ghostPad.visible = false; this.ghostPad.renderOrder = 4; this.scene.add(this.ghostPad);
@@ -314,8 +316,12 @@ export class View {
     if (id === -1) return { node: NODES.find(n => c.x >= n.x && c.x <= n.x + 1 && c.z >= n.z && c.z <= n.z + 1) };
     return { cell: c };
   }
-  focus(x, z) { this.cam.target.set(x, 0, z); }
-  focusBuilding(id) { const e = this.bm.get(id); if (e) this.cam.target.set(e.cx, 0, e.cz + 2); }
+  // Centre on a point; on phones a panel covers the lower half, so aim a little "below" it.
+  focus(x, z) {
+    const k = window.innerWidth < 760 ? Math.min(this.cam.dist, 70) * 0.3 : 0;
+    this.cam.target.set(x + Math.sin(this.cam.yaw) * k, 0, z + Math.cos(this.cam.yaw) * k);
+  }
+  focusBuilding(id) { const e = this.bm.get(id); if (e) { if (this.cam.dist > 80) this.cam.dist = 70; this.focus(e.cx, e.cz); } }
 
   // ---------------------------------------------------------------- particles
   puff(x, y, z, kind) {
