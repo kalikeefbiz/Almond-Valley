@@ -3,6 +3,7 @@ import * as THREE from 'three';
 import { N, CELL, B, ZONES, NODES, NODE_RANGE, HW, CLICKERS } from './data.js';
 import { footprint, cellZone } from './sim.js';
 import { World, cellToWorld, HALF, worldToCell, terrainH } from './world.js';
+import { loadMasterClicker, poseMasterClicker } from './clickerModel.js';
 import { makeMaterial, buildingGeometry, heartwellGeometry, clickerGeometry, personGeometry, PAL } from './models.js';
 
 const _v = new THREE.Vector3(), _d = new THREE.Object3D(), _col = new THREE.Color();
@@ -436,18 +437,33 @@ export class View {
   inView(x, z) { return Math.hypot(x - this.cam.target.x, z - this.cam.target.z) < this.cam.dist * 1.3 + 20; }
 
   // ---------------------------------------------------------------- clickers
+  // Master Clicker model test: 'new' (Meshy model, game lighting), 'pbr' (Meshy model, full metal material) or 'classic' (built-in shapes).
+  setClickerModel(mode) {
+    this.clickerModel = mode; const drop = () => { for (const [id, e] of this.cm) if (e.role === 'master') { this.scene.remove(e.group); this.cm.delete(id); } };
+    this.mc = null; drop(); if (mode === 'classic') return;
+    const key = mode === 'pbr' ? 'pbr' : 'lit', cache = this._mcCache || (this._mcCache = {});
+    if (mode === 'pbr' && !this._pmrem) { const sky = new THREE.Scene(); sky.background = new THREE.Color(0xd8b890); const dome = new THREE.Mesh(new THREE.SphereGeometry(5, 16, 8), new THREE.MeshBasicMaterial({ side: THREE.BackSide, vertexColors: true })); const pa = dome.geometry.attributes.position, cl = new Float32Array(pa.count * 3); for (let i = 0; i < pa.count; i++) { const t = pa.getY(i) / 5; _col.setRGB(t > 0 ? 1.0 + t * 0.6 : 0.5 + t * 0.2, t > 0 ? 0.82 + t * 0.5 : 0.36 + t * 0.15, t > 0 ? 0.62 + t * 0.7 : 0.24 + t * 0.1); cl[i * 3] = _col.r; cl[i * 3 + 1] = _col.g; cl[i * 3 + 2] = _col.b; } dome.geometry.setAttribute('color', new THREE.BufferAttribute(cl, 3)); sky.add(dome); const pm = new THREE.PMREMGenerator(this.renderer); this._pmrem = pm.fromScene(sky, 0.02).texture; pm.dispose(); }
+    (cache[key] || (cache[key] = loadMasterClicker(import.meta.env.BASE_URL + 'models/master_clicker.glb', key))).then(t => {
+      if (this.clickerModel !== mode) return; if (key === 'pbr') t.material.envMap = this._pmrem; this.mc = t; drop();
+    }).catch(err => { console.warn('Master Clicker model failed to load; using built-in shapes.', err); });
+  }
   _updClickers(dt, simH) {
     const S = this.sim.S, seen = new Set();
     for (const c of S.clickers) {
       seen.add(c.id);
       let e = this.cm.get(c.id);
+      if (!e && c.role === 'master' && this.mc) {
+        const inst = this.mc.instantiate(), group = inst.root;
+        const crate = new THREE.Mesh(this._crateGeo || (this._crateGeo = buildingCrate()), this.mat); crate.position.set(0, 2.05, -0.75); crate.visible = false; inst.body.add(crate);
+        this.scene.add(group); e = { group, inst, crate, role: c.role, phase: 0, act: 0, px: c.x, pz: c.z }; this.cm.set(c.id, e);
+      }
       if (!e) {
         const cg = this._cg || (this._cg = {}); const g = cg[c.role] || (cg[c.role] = clickerGeometry(c.role));
         const group = new THREE.Group(); const body = new THREE.Mesh(g.body, this.mat); body.castShadow = true; group.add(body);
         const legs = [];
         for (const sx of [-1, 1]) for (const sz of [-1, 1]) { const l = new THREE.Mesh(g.leg, this.mat); l.position.set(sx * g.hipX, g.y0, sz * g.hipZ); l.scale.x = sx; l.castShadow = true; group.add(l); legs.push(l); }
         const crate = new THREE.Mesh(this._crateGeo || (this._crateGeo = buildingCrate()), this.mat); crate.position.set(0, g.y0 + 1.0, -0.6); crate.visible = false; group.add(crate);
-        this.scene.add(group); e = { group, body, legs, crate, g, phase: 0, px: c.x, pz: c.z };
+        this.scene.add(group); e = { group, body, legs, crate, g, role: c.role, phase: 0, px: c.x, pz: c.z };
         this.cm.set(c.id, e);
       }
       const wx = (c.x - N / 2) * CELL, wz = (c.z - N / 2) * CELL;
@@ -456,6 +472,12 @@ export class View {
       if (c.dir != null) { let dy = c.dir - e.group.rotation.y; while (dy > Math.PI) dy -= 6.2832; while (dy < -Math.PI) dy += 6.2832; e.group.rotation.y += dy * Math.min(1, dt * 6); }
       const active = !c.broken && !c.dormant;
       const acting = active && c.state === 'act' && c.task && c.task.kind !== 'idle';
+      if (e.inst) {
+        const moving = moved > 1e-5; if (moving) e.phase += moved * 2.6; if (acting) e.act += dt * 4;
+        poseMasterClicker(e.inst, this.debugPose ? { ...this.debugPose, dt: 1 } : { walk: e.phase, moving, act: e.act, acting, broken: c.broken, carry: !!c.carry, dt });
+        if (this.inView(wx, wz)) { if (moving && Math.random() < 0.25) this.puff(wx, 0.2, wz, 'dust'); else if (acting && Math.random() < dt * 9) { const fx = wx + Math.sin(e.group.rotation.y) * 2.4, fz = wz + Math.cos(e.group.rotation.y) * 2.4; this.puff(fx, 0.8 + Math.random(), fz, c.task.kind === 'work' ? 'dust' : 'spark'); } }
+        e.crate.visible = !!c.carry; continue;
+      }
       if (moved > 1e-5) { e.phase += moved * 3.2; e.legs.forEach((l, i) => { l.rotation.x = Math.sin(e.phase + (i === 0 || i === 3 ? 0 : Math.PI)) * 0.45; }); e.body.position.y = Math.abs(Math.sin(e.phase * 2)) * 0.06; if (Math.random() < 0.25 && this.inView(wx, wz)) this.puff(wx, 0.2, wz, 'dust'); }
       else if (acting) { e.phase += dt * 5; e.body.position.y = Math.sin(e.phase) * 0.05; e.body.rotation.x = Math.sin(e.phase * 0.7) * 0.03; if (this.inView(wx, wz) && Math.random() < dt * 9) { const k = c.task.kind; const fx = wx + Math.sin(e.group.rotation.y) * 2.4, fz = wz + Math.cos(e.group.rotation.y) * 2.4; this.puff(fx, 0.8 + Math.random(), fz, k === 'work' ? 'dust' : 'spark'); } }
       else { e.body.position.y = c.broken ? -0.25 : 0; e.body.rotation.x = c.broken ? 0.08 : 0; }
