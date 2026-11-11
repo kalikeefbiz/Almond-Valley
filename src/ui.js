@@ -1,6 +1,6 @@
 // HUD and panels. Plain DOM, event delegation through data-a="action:arg:arg".
-import { B, CATS, BUILD_ORDER, RES_INFO, TECH, TECH_ORDER, HW, CLICKERS, POLICIES, ZONES, EXPEDITIONS, PRICES, RIG_COST, YEAR, NODE_NAMES, NODE_RANGE } from './data.js';
-import { footprint } from './sim.js';
+import { B, CATS, BUILD_ORDER, RES_INFO, TECH, TECH_ORDER, BRANCHES, LEVELS, HW, CLICKERS, POLICIES, ZONES, EXPEDITIONS, PRICES, RIG_COST, YEAR, NODE_NAMES, NODE_RANGE } from './data.js';
+import { footprint, costText } from './sim.js';
 
 const ic = (n, cls = '') => `<svg class="ic ${cls}"><use href="#i-${n}"/></svg>`;
 const fmt = (n) => Math.round(n).toLocaleString('en-US');
@@ -237,14 +237,14 @@ export class UI {
     else if (b.issue && !d.housing && !d.unique) { status = b.issue; sc = b.eff > 0 ? 'warn' : 'bad'; }
     let h = `<p class="desc">${d.desc}</p><div class="stats"><span class="stat ${sc}">● ${status}</span>`;
     if (d.housing && !building) h += `<span class="stat">${ic('people')}Residents ${Math.round(b.res || 0)} / ${d.housing.cap}</span><span class="stat">${ic('temp')}Heat protection ${pct(b.prot || 0)}</span>${d.housing.morale ? `<span class="stat good">${ic('smile')}Morale +${d.housing.morale}</span>` : ''}`;
-    if (d.workers && !building) h += `<span class="stat">${ic('people')}${b.staff} / ${d.workers} workers</span>`;
+    if (d.workers && !building) h += `<span class="stat">${ic('people')}${b.staff} / ${sim.workersOf(b)} workers</span>`;
     if (d.skilled && !building) h += `<span class="stat ${b.sk < d.skilled ? 'warn' : ''}">Skilled ${b.sk} / ${d.skilled}</span>`;
     h += '</div>';
     if (building) h += meter('Construction', b.progress / d.work, pct(b.progress / d.work)) + `<p class="desc">${b.crew ? b.crew + ' labourers on site.' : 'Waiting for free labourers or a Clicker.'} Unassigned workers build; Clickers build much faster.</p>`;
     else {
       if (d.wear) h += meter('Condition', b.cond / 100, pct(b.cond / 100), b.cond < 35 ? 'r' : '');
       if (d.workers) h += meter('Efficiency', Math.min(1, b.eff), pct(b.eff), b.eff < 0.4 ? 'r' : 'g');
-      if (b.upgrade) h += meter('Upgrade', b.upgrade.progress / b.upgrade.work, pct(b.upgrade.progress / b.upgrade.work));
+      if (b.upgrade) h += meter(`Upgrading to ${b.upgrade.to ? B[b.upgrade.to].name : LEVELS[b.type][b.upgrade.lv - 1].name}`, b.upgrade.progress / b.upgrade.work, pct(b.upgrade.progress / b.upgrade.work)) + `<p class="desc">${b.crew ? b.crew + ' labourers on the job.' : 'Waiting for free labourers or a Clicker.'} Materials already paid.</p><div class="rowl"><div class="nm"><b>Build this first</b><small>Send construction crews here before other sites</small></div><button class="tog ${b.prio ? 'on' : ''}" data-a="prio:${b.id}" aria-label="priority"></button></div>`;
       // networks
       const nets = [];
       if (d.wantsWater) nets.push(`<span class="stat ${info.watered ? 'good' : 'bad'}">${ic('water')}${info.watered ? 'On water network' : 'No water service'}</span>`);
@@ -275,7 +275,7 @@ export class UI {
       // workforce
       if (d.workers) {
         const eq = sim.C.equiv[b.id];
-        h += `<div class="sec">Workforce</div><div class="rowl"><div class="nm"><b>Worker slots</b><small>${b.staff} at work${eq ? ` · Clickers +${eq.toFixed(1)}` : ''}${S.idle ? ` · ${S.idle} unassigned in the valley` : ''}</small></div>${stepper('slots:' + b.id, b.slots, d.workers)}</div>
+        h += `<div class="sec">Workforce</div><div class="rowl"><div class="nm"><b>Worker slots</b><small>${b.staff} at work${eq ? ` · Clickers +${eq.toFixed(1)}` : ''}${S.idle ? ` · ${S.idle} unassigned in the valley` : ''}</small></div>${stepper('slots:' + b.id, b.slots, sim.workersOf(b))}</div>
           <div class="rowl"><div class="nm"><b>Staff first</b><small>Fill this building before others when workers are short</small></div><button class="tog ${b.prio ? 'on' : ''}" data-a="prio:${b.id}" aria-label="priority"></button></div>`;
         if (d.auto) {
           const mine = S.clickers.filter(c => c.role === d.auto);
@@ -293,9 +293,19 @@ export class UI {
         }
       }
       // upgrade
-      if (d.upgradeTo && !b.upgrade) {
-        const to = B[d.upgradeTo], chk = sim.canUpgrade(b);
-        h += `<div class="sec">Upgrade</div><div class="rowl"><div class="nm"><b>${to.name} <small style="display:inline">Tier ${ROMAN[to.tier]}</small></b><small>Sleeps ${to.housing.cap} · heat protection ${pct(to.housing.prot)} · morale +${to.housing.morale}</small>${cost(sim, to.upCost)}${chk.ok ? '' : `<small class="bad">${chk.reason}</small>`}</div><button class="btn sm pri ${chk.ok ? '' : 'off'}" data-a="upgrade:${b.id}">Upgrade</button></div>`;
+      if (!b.upgrade) {
+        const n = sim.nextUpgrade(b), chk = sim.canUpgrade(b);
+        if (n) {
+          let fx;
+          if (n.kind === 'tier') { const to = B[n.to]; fx = `Sleeps ${to.housing.cap} · heat protection ${pct(to.housing.prot)} · morale +${to.housing.morale}`; }
+          else { const L = n.def, cur = sim.lvDef(b), bits = [];
+            if (L.workers && L.workers !== sim.workersOf(b)) bits.push(`${L.workers} worker slots`);
+            if (L.out && L.out !== (cur.out || 1)) bits.push(`output ×${L.out}`);
+            if (L.rp && L.rp !== (cur.rp || 1)) bits.push(`research ×${L.rp}`);
+            if (L.cap) bits.push(`storage ×${L.cap}`); if (L.speed) bits.push(`assembly ×${L.speed}`);
+            fx = bits.join(' · '); }
+          h += `<div class="sec">Upgrade</div><div class="rowl"><div class="nm"><b>${n.name} <small style="display:inline">${n.kind === 'tier' ? 'Tier ' + ROMAN[B[n.to].tier] : 'Level ' + ROMAN[n.lv]}</small></b><small>${fx}${n.tech ? ` · needs ${TECH[n.tech].name}` : ''} · ${n.work} labour</small>${cost(sim, n.cost)}${chk.ok ? '' : `<small class="bad">${chk.reason}</small>`}</div><button class="btn sm pri ${chk.ok ? '' : 'off'}" data-a="upgrade:${b.id}">Upgrade</button></div>`;
+        } else if (LEVELS[b.type]) h += `<div class="sec">Upgrade</div><p class="desc">Fully upgraded.</p>`;
       }
     }
     // actions
@@ -305,7 +315,8 @@ export class UI {
       if (!building && (d.workers || d.in) && !d.housing) h += `<button class="btn sm" data-a="toggle:${b.id}">${b.on ? 'Pause' : 'Resume'}</button>`;
       h += `<button class="btn sm red" data-a="demolish:${b.id}">${this.confirm === 'd' + b.id ? 'Tap again to confirm' : building ? 'Cancel (full refund)' : 'Demolish (50% back)'}</button></div>`;
     }
-    return { title: `${d.name}${d.tier ? `<small>Tier ${ROMAN[d.tier]}</small>` : ''}`, body: h };
+    const L = LEVELS[b.type];
+    return { title: `${L ? sim.lvDef(b).name : d.name}${d.tier ? `<small>Tier ${ROMAN[d.tier]}</small>` : L ? `<small>Level ${ROMAN[b.lv || 1]}</small>` : ''}`, body: h };
   }
 
   p_heartwell() {
@@ -341,7 +352,7 @@ export class UI {
     h += `<div class="rowl" data-a="go:heartwell"><div class="nm"><b>Heartwell</b><small>${S.hw.staff.ext + S.hw.staff.pur + S.hw.staff.tur} crew · tap to manage</small></div></div>`;
     for (const b of sim.C.staffList) {
       if (b.progress != null) continue; const d = B[b.type];
-      h += `<div class="rowl"><div class="nm" data-a="focusb:${b.id}"><b>${d.name}</b><small class="${b.eff <= 0 ? 'bad' : ''}">${b.staff}/${d.workers} · ${b.eff > 0 ? pct(b.eff) : b.issue}</small></div>${stepper('slots:' + b.id, b.slots, d.workers)}</div>`;
+      h += `<div class="rowl"><div class="nm" data-a="focusb:${b.id}"><b>${d.name}</b><small class="${b.eff <= 0 ? 'bad' : ''}">${b.staff}/${sim.workersOf(b)} · ${b.eff > 0 ? pct(b.eff) : b.issue}</small></div>${stepper('slots:' + b.id, b.slots, sim.workersOf(b))}</div>`;
     }
     h += '<div class="sec">Record</div>' + spark(S.hist, 'p', '#f3e7d0', 'Population') + spark(S.hist, 'm', '#84dd6c', 'Morale');
     return { title: 'People', body: h };
@@ -379,12 +390,20 @@ export class UI {
   }
 
   p_research() {
-    const sim = this.sim, T = sim.S.tech, rate = sim.researchRate();
+    const sim = this.sim, T = sim.S.tech, rate = sim.researchRate(), src = sim.researchSources();
     let h = `<div class="stats"><span class="stat">${ic('flask')}${rate.toFixed(1)} points/day</span><span class="stat">${Object.keys(T.done).length} / ${TECH_ORDER.length} complete</span></div>`;
-    if (!sim.count('school')) h += `<p class="desc">Research is slow without a School. Teachers add 3 points a day each.</p>`;
-    for (const id of TECH_ORDER) {
-      const t = TECH[id], done = T.done[id], cur = T.cur === id, chk = sim.canResearch(id);
-      h += `<div class="tech ${done ? 'done' : cur ? 'cur' : ''}"><div class="hd"><b>${t.name}</b>${done ? `<span style="color:var(--good)">${ic('check')}</span>` : cur ? `<span>${fmtH((t.rp - T.rp) / rate * 24)}</span>` : `<button class="btn sm ${chk.ok ? 'pri' : 'off'}" data-a="research:${id}">Research</button>`}</div><p>${t.desc}</p>${cur ? meter('', T.rp / t.rp, pct(T.rp / t.rp)) : done ? '' : `<div class="cost"><span>${ic('flask')}${t.rp} pts</span>${costInner(sim, t.cost)}</div>${chk.ok || chk.reason === 'Lab busy' ? '' : `<div class="why">${chk.reason}</div>`}`}</div>`;
+    // where the points come from (research is chosen here; buildings only supply capacity)
+    h += '<div class="sec">Research capacity</div>';
+    for (const x of src) h += x.id == null ? `<p class="desc">${x.name}: ${x.v.toFixed(1)}/day. Build and staff a School to research properly.</p>` : `<div class="rowl"><div class="nm" data-a="focusb:${x.id}"><b>${x.name}</b><small class="${x.staff ? '' : 'bad'}">${x.staff}/${x.max} staff · ${x.v.toFixed(1)} pts/day${x.staff ? '' : ' — needs workers'}</small></div></div>`;
+    if (T.cur) { const t = TECH[T.cur]; h += meter(t.name, T.rp / t.rp, rate > 0 ? fmtH((t.rp - T.rp) / rate * 24) : 'stalled'); }
+    for (const br of BRANCHES) {
+      h += `<div class="sec">${br.name}</div>`;
+      for (const id of TECH_ORDER) {
+        const t = TECH[id]; if (t.branch !== br.id) continue;
+        const done = T.done[id], cur = T.cur === id, chk = sim.canResearch(id);
+        const needs = [...(t.req || []).map(r => TECH[r].name), ...(t.facility ? [B[t.facility].name + ' (built)'] : [])];
+        h += `<div class="tech ${done ? 'done' : cur ? 'cur' : ''}"><div class="hd"><b>${t.name}</b>${done ? `<span style="color:var(--good)">${ic('check')}</span>` : cur ? `<span>${rate > 0 ? fmtH((t.rp - T.rp) / rate * 24) : 'stalled'}</span>` : `<button class="btn sm ${chk.ok ? 'pri' : 'off'}" data-a="research:${id}">Research</button>`}</div><p>${t.desc}</p>${done || cur ? '' : `<p>${t.rp} pts${Object.keys(t.cost).length ? ' · ' + costText(t.cost) : ''}${needs.length ? ' · needs ' + needs.join(', ') : ''}${chk.ok || chk.reason === 'Another project is under way' ? '' : ` · <span class="bad">${chk.reason}</span>`}</p>`}</div>`;
+      }
     }
     return { title: 'Research', body: h };
   }

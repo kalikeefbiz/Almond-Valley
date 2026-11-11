@@ -1,6 +1,6 @@
 // Headless gameplay tests: node test/sim.test.mjs
-import { Sim, footprint, cellZone } from '../src/sim.js';
-import { B, N, YEAR, TECH, ZONES } from '../src/data.js';
+import { Sim, footprint, cellZone, SAVE_VERSION } from '../src/sim.js';
+import { B, N, YEAR, TECH, ZONES, LEVELS } from '../src/data.js';
 import { CANYON, PIER_CELLS } from '../src/terrain.js';
 import { readFileSync } from 'node:fs';
 
@@ -146,10 +146,81 @@ console.log('--- old save migration');
   const old = JSON.parse(readFileSync(new URL('./fixtures-v1-save.json', import.meta.url)));
   const n0 = old.buildings.length, roads0 = old.roads.reduce((a, b) => a + b, 0), pop0 = old.pop;
   const s = new Sim(JSON.parse(JSON.stringify(old)));
-  ok(s.S.v === 2 && [0, 1, 2, 4].includes(s.S.speed), 'v1 save migrated (speed ' + old.speed + ' -> ' + s.S.speed + ')');
+  ok(s.S.v === SAVE_VERSION && [0, 1, 2, 4].includes(s.S.speed), 'v1 save migrated (speed ' + old.speed + ' -> ' + s.S.speed + ')');
   ok(s.S.buildings.length === n0 && s.S.roads.reduce((a, b) => a + b, 0) === roads0, 'buildings and roads preserved');
   s.advance(24 * 3);
   ok(!s.S.over && s.S.pop >= pop0 - 5, `old settlement keeps running (pop ${pop0} -> ${s.S.pop})`);
+}
+
+
+console.log('--- research from infrastructure');
+{
+  const s = new Sim(); const S = s.S;
+  const school = S.buildings.find(b => b.type === 'school');
+  ok(school && school.progress == null && school.staff > 0, `starting School is built and staffed (${school && school.staff} staff)`);
+  const src = s.researchSources();
+  ok(src.length === 1 && src[0].id === school.id && s.researchRate() > 5, `research comes from the School (${s.researchRate().toFixed(1)}/day), no passive trickle`);
+  s.setSlots(school.id, 0); s.advance(0.3);
+  ok(s.researchRate() === 0, 'unstaffed School produces no research');
+  s.setSlots(school.id, 2); s.advance(0.3);
+  // prerequisites, facility requirement, cost deduction
+  ok(/Needs Tempered Tools/.test(s.canResearch('fabrication').reason), 'tech prerequisites enforced');
+  S.tech.done.fabrication = true;
+  ok(/Fabrication Plant/.test(s.canResearch('specialists').reason), 'advanced tech needs the manufacturing facility: ' + s.canResearch('specialists').reason);
+  delete S.tech.done.fabrication;
+  const w0 = S.res.wood; ok(s.startResearch('apprentice') && S.res.wood === w0 - 40, 'starting research deducts its cost');
+  ok(/under way/.test(s.canResearch('insulation').reason), 'one project at a time, chosen centrally');
+  let d = 0; while (S.tech.cur && d < 10) { s.advance(24); d++; }
+  ok(S.tech.done.apprentice, `Apprenticeships researched in ${d} days from one School`);
+  // research unlocks only: nothing is built or upgraded by it
+  const n0 = S.buildings.length, lv0 = S.buildings.map(b => b.lv + b.type).join();
+  S.tech.done.precision = true; S.tech.done.laboratory = true; s.advance(1);
+  ok(S.buildings.length === n0 && S.buildings.map(b => b.lv + b.type).join() === lv0, 'research does not build or upgrade anything by itself');
+  // a settlement with no School still researches (slowly) until it builds one
+  const t = new Sim(); t.demolish(t.S.buildings.find(b => b.type === 'school').id);
+  ok(t.researchRate() > 0 && t.researchSources()[0].id === null, 'no School: slow notebook research so nobody is stuck');
+  const r = t.place('school', 12, 14, 0); t.S.res.wood += 200; t.advance(24 * 2);
+  ok(t.byId(r.id).progress == null && t.researchSources().every(x => x.id !== null), 'once a School stands the notebook trickle stops');
+}
+
+console.log('--- per-building upgrades');
+{
+  const s = new Sim(); const S = s.S;
+  S.res.wood += 500; S.res.stone += 500; S.res.metal += 300; S.res.parts += 200;
+  const shops = S.buildings.filter(b => b.type === 'workshop'); const ws = shops[0];
+  ok(s.nextUpgrade(ws).name === 'Improved Workshop' && s.canUpgrade(ws).ok, 'Workshop Lv 2 needs only materials and labour');
+  const out0 = s.outMult(ws), w0 = S.res.wood, m0 = S.res.metal;
+  ok(s.upgrade(ws.id) && S.res.wood === w0 - 60 && S.res.metal === m0 - 30, 'upgrade deducts its materials up front');
+  ok(ws.upgrade && ws.lv === 1, 'upgrade is a construction job, not instant');
+  let h = 0; while (ws.upgrade && h < 72) { s.advance(1); h++; }
+  ok(ws.lv === 2 && !ws.upgrade, `labourers finished the upgrade in ${h} h`);
+  ok(s.workersOf(ws) === 6 && s.outMult(ws) > out0 * 1.35, 'Lv 2 adds worker slots and output');
+  ok(/Precision Machining/.test(s.canUpgrade(ws).reason), 'Lv 3 is gated by research');
+  // a second workshop keeps its own level
+  const r = s.place('workshop', 12, 14, 0); s.advance(24);
+  ok(s.byId(r.id).lv === 1, 'a second Workshop has its own level (1 vs 2)');
+  // School upgrade raises research capacity
+  const sc = S.buildings.find(b => b.type === 'school'); s.setPrio(sc.id, 1); S.pop += 10; s.advance(1); const rate0 = s.researchRate();
+  ok(sc.staff === 2 && rate0 > 4, `School fully staffed before upgrade (${sc.staff}, ${rate0.toFixed(1)}/day)`);
+  s.upgrade(sc.id); h = 0; while (sc.upgrade && h < 72) { s.advance(1); h++; }
+  s.setSlots(sc.id, 4); s.advance(1);
+  ok(sc.lv === 2 && sc.staff === 4 && s.researchRate() > rate0 * 1.4, `Schoolhouse expands research (${rate0.toFixed(1)} -> ${s.researchRate().toFixed(1)}/day)`);
+  // housing tiers still use their own path
+  const home = S.buildings.find(b => b.type === 'frontier'); ok(s.nextUpgrade(home).kind === 'tier', 'homes still upgrade by tier');
+  // demolishing mid-upgrade refunds the upgrade
+  const q = S.buildings.find(b => b.type === 'quarry'); s.upgrade(q.id); const st0 = S.res.stone; s.demolish(q.id);
+  ok(S.res.stone > st0, 'cancelling an upgrade by demolition refunds it');
+}
+
+console.log('--- v2 save with research in progress');
+{
+  const old = JSON.parse(readFileSync(new URL('./fixtures-v2-save.json', import.meta.url)));
+  const s = new Sim(JSON.parse(JSON.stringify(old)));
+  ok(s.S.v === SAVE_VERSION && s.S.buildings.every(b => b.lv === 1), 'v2 save migrated, buildings at level 1');
+  ok(s.S.tech.done.heatshift && s.S.tech.cur === 'insulation' && s.S.tech.rp === old.tech.rp, 'research progress preserved');
+  ok(!s.S.buildings.some(b => b.type === 'school') && s.researchRate() > 0, 'old settlement without a School keeps researching');
+  let d = 0; while (s.S.tech.cur && d < 20) { s.advance(24); d++; }
+  ok(s.S.tech.done.insulation, `in-progress project still completes (${d} days)`);
 }
 
 console.log(fails ? `\n${fails} FAILED` : '\nALL PASSED');

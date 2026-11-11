@@ -1,13 +1,13 @@
 // Almond Valley simulation. Pure state + rules, no rendering. Runs in the browser and in node tests.
 import {
   N, YEAR, RES, BASE_CAP, WAREHOUSE_CAP, ZONES, BUILD_PACE, NODES, NODE_RANGE, B, PRIO_ORDER, HW, CLICKERS,
-  RIG_COST, TECH, PRICES, EXPEDITIONS, seasonTemp, seasonName, START_BUILDINGS, START_ROADS, START_PIPES,
+  RIG_COST, TECH, LEVELS, PRICES, EXPEDITIONS, seasonTemp, seasonName, START_BUILDINGS, START_ROADS, START_PIPES,
 } from './data.js';
 import { findPath } from './path.js';
 import { CANYON, PIER_CELLS } from './terrain.js';
 
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
-export const SAVE_VERSION = 2;
+export const SAVE_VERSION = 3;
 
 export function footprint(b) {
   const def = B[b.type];
@@ -103,6 +103,11 @@ export class Sim {
   seasonName() { return seasonName(this.doy()); }
   daysToDoubleNoon() { const d = this.doy(); return d < 20 ? 20 - d : d < 30 ? 0 : YEAR - d + 20; }
   def(b) { return B[b.type]; }
+  // per-building upgrade level (1 = as placed) and its totals
+  lvDef(b) { const L = LEVELS[b.type]; return L ? L[Math.min(L.length, b.lv || 1) - 1] : null; }
+  maxLv(b) { const L = LEVELS[b.type]; return L ? L.length : 1; }
+  workersOf(b) { const l = this.lvDef(b); return (l && l.workers) || B[b.type].workers || 0; }
+  lvMul(b, k) { const l = this.lvDef(b); return (l && l[k]) || 1; }
   byId(id) { return this.C.byId.get(id); }
   count(type, done = true) { let n = 0; for (const b of this.S.buildings) if (b.type === type && (!done || b.progress == null)) n++; return n; }
   hasTech(t) { return !t || !!this.S.tech.done[t]; }
@@ -173,7 +178,7 @@ export class Sim {
       const def = B[b.type]; if (b.progress != null) continue;
       const f = footprint(b);
       if (def.waterCap) waterCap += def.waterCap;
-      if (def.storage) for (const k in WAREHOUSE_CAP) caps[k] += WAREHOUSE_CAP[k];
+      if (def.storage) for (const k in WAREHOUSE_CAP) caps[k] += Math.round(WAREHOUSE_CAP[k] * this.lvMul(b, 'cap'));
       if (def.waterRadius && !b.broken) {
         const on = touches(f, net) || (S.pipes[f.z * N + f.x] && net[f.z * N + f.x]);
         C.onNet[b.id] = !!on;
@@ -302,7 +307,7 @@ export class Sim {
   }
   _addBuilding(type, x, z, rot, done) {
     const def = B[type], S = this.S;
-    const b = { id: S.nextId++, type, x, z, rot, cond: done ? 85 + Math.floor(this.rand() * 12) : 100, slots: def.workers || 0, staff: 0, sk: 0, prio: 0, progress: done ? null : 0, out: {}, on: true, broken: false, eff: 0, issue: '' };
+    const b = { id: S.nextId++, type, x, z, rot, cond: done ? 85 + Math.floor(this.rand() * 12) : 100, slots: def.workers || 0, lv: 1, staff: 0, sk: 0, prio: 0, progress: done ? null : 0, out: {}, on: true, broken: false, eff: 0, issue: '' };
     if (type === 'fabrication') b.queue = [];
     S.buildings.push(b);
     return b;
@@ -316,7 +321,7 @@ export class Sim {
     const S = this.S, b = this.byId(id); if (!b || B[b.type].unique) return false;
     const def = B[b.type];
     this.refund(def.cost, b.progress != null ? 1 : 0.5);
-    if (b.upgrade) this.refund(B[b.upgrade.to].upCost, 1);
+    if (b.upgrade) this.refund(b.upgrade.to ? B[b.upgrade.to].upCost : b.upgrade.cost, 1);
     for (const r in b.out) this.S.res[r] = Math.min(this.cap(r), this.S.res[r] + b.out[r]);
     S.buildings.splice(S.buildings.indexOf(b), 1);
     for (const c of S.clickers) if (c.task && c.task.bid === id) { c.task = null; c.path = []; }
@@ -325,23 +330,34 @@ export class Sim {
     this.events.push({ type: 'removed', id });
     return true;
   }
+  // Upgrades are per building: housing moves up a tier (type change); other buildings gain a level.
+  // Either way the player pays materials up front and construction labour finishes the job.
+  nextUpgrade(b) {
+    const def = B[b.type];
+    if (def.upgradeTo) { const to = B[def.upgradeTo]; return { kind: 'tier', to: def.upgradeTo, name: to.name, tech: to.tech, cost: to.upCost, work: to.upWork }; }
+    const L = LEVELS[b.type], lv = b.lv || 1;
+    if (L && lv < L.length) { const n = L[lv]; return { kind: 'level', lv: lv + 1, name: n.name, tech: n.tech, cost: n.cost, work: n.work, def: n }; }
+    return null;
+  }
   canUpgrade(b) {
-    const def = B[b.type]; if (!def.upgradeTo || b.progress != null || b.upgrade) return { ok: false, reason: '' };
-    const to = B[def.upgradeTo];
-    if (!this.hasTech(to.tech)) return { ok: false, reason: `Research ${TECH[to.tech].name}` };
-    if (!this.canAfford(to.upCost)) return { ok: false, reason: 'Not enough materials' };
+    const n = this.nextUpgrade(b);
+    if (!n) return { ok: false, reason: 'Fully upgraded' };
+    if (b.progress != null) return { ok: false, reason: 'Finish construction first' };
+    if (b.upgrade) return { ok: false, reason: 'Upgrade under way' };
+    if (!this.hasTech(n.tech)) return { ok: false, reason: `Research ${TECH[n.tech].name}` };
+    if (!this.canAfford(n.cost)) return { ok: false, reason: 'Not enough ' + Object.keys(n.cost).filter(k => this.S.res[k] < n.cost[k]).join(', ') };
     return { ok: true };
   }
   upgrade(id) {
     const b = this.byId(id); if (!b) return false;
     const chk = this.canUpgrade(b); if (!chk.ok) return false;
-    const to = B[B[b.type].upgradeTo];
-    this.pay(to.upCost);
-    b.upgrade = { to: B[b.type].upgradeTo, progress: 0, work: to.upWork };
+    const n = this.nextUpgrade(b);
+    this.pay(n.cost);
+    b.upgrade = n.kind === 'tier' ? { to: n.to, progress: 0, work: n.work } : { lv: n.lv, progress: 0, work: n.work, cost: n.cost };
     this.version++;
     return true;
   }
-  setSlots(id, n) { const b = this.byId(id); if (!b) return; b.slots = clamp(n, 0, B[b.type].workers || 0); }
+  setSlots(id, n) { const b = this.byId(id); if (!b) return; b.slots = clamp(n, 0, this.workersOf(b)); }
   setPrio(id, p) { const b = this.byId(id); if (!b) return; b.prio = p; this.C.staffList.sort((a, c) => (c.prio - a.prio) || ((PRIO_ORDER[a.type] || 9) - (PRIO_ORDER[c.type] || 9)) || (a.id - c.id)); }
   toggle(id) { const b = this.byId(id); if (!b) return; b.on = !b.on; this.version++; }
   patchCost(b) { const d = B[b.type]; return { parts: Math.max(3, Math.round((d.w * d.d) * 1.2)) }; }
@@ -377,21 +393,29 @@ export class Sim {
   canResearch(id) {
     const t = TECH[id], T = this.S.tech;
     if (T.done[id]) return { ok: false, reason: 'Complete' };
-    if (T.cur) return { ok: false, reason: T.cur === id ? 'In progress' : 'Lab busy' };
+    if (T.cur) return { ok: false, reason: T.cur === id ? 'In progress' : 'Another project is under way' };
     for (const r of t.req || []) if (!T.done[r]) return { ok: false, reason: `Needs ${TECH[r].name}` };
+    if (t.facility && !this.count(t.facility)) return { ok: false, reason: `Needs a completed ${B[t.facility].name}` };
     if (!this.canAfford(t.cost)) return { ok: false, reason: 'Not enough materials' };
     return { ok: true };
   }
   startResearch(id) { if (!this.canResearch(id).ok) return false; this.pay(TECH[id].cost); this.S.tech.cur = id; this.S.tech.rp = 0; return true; }
-  researchRate() {
-    let r = 3;
+  // Research comes from staffed Schools (and, less, Community Offices). A settlement with neither still keeps
+  // a slow trickle from settlers' notebooks so old saves are never stuck; it stops once a research building stands.
+  researchSources() {
+    const out = []; let infra = false;
     for (const b of this.S.buildings) {
       if (b.progress != null) continue;
-      if (b.type === 'school') r += b.staff * 3 * (0.5 + 0.5 * b.cond / 100);
-      if (b.type === 'office') r += b.staff * 1.5;
+      if (b.type !== 'school' && b.type !== 'office') continue;
+      infra = true; if (b.broken || !b.on) continue;
+      const per = b.type === 'school' ? 3 * (0.5 + 0.5 * b.cond / 100) : 1.5;
+      const v = b.staff * per * this.lvMul(b, 'rp');
+      out.push({ id: b.id, name: this.lvDef(b).name, v, staff: b.staff, max: this.workersOf(b) });
     }
-    return r;
+    if (!infra) out.push({ id: null, name: "Settlers' notebooks (no School yet)", v: 1.5 });
+    return out;
   }
+  researchRate() { let r = 0; for (const s of this.researchSources()) r += s.v; return r; }
   setPolicy(k, v) {
     if (k === 'curfew' && !this.hasTech('heatshift')) return false;
     this.S.policies[k] = v; return true;
@@ -665,7 +689,7 @@ export class Sim {
     let market = 0, bet = 0, office = 0;
     for (const b of S.buildings) {
       if (b.progress != null || b.broken) continue;
-      const sr = B[b.type].workers ? b.staff / B[b.type].workers : 0;
+      const sr = B[b.type].workers ? b.staff / this.workersOf(b) : 0;
       if (b.type === 'market') market += sr * 60; else if (b.type === 'betting') bet += sr * 90; else if (b.type === 'office') office = sr;
     }
     const foodDays = S.res.food / Math.max(1, pop);
@@ -690,7 +714,7 @@ export class Sim {
     S.grief = Math.max(0, S.grief - S.grief * 0.08 * f - 0.3 * f);
     // education
     let teachers = 0; for (const b of S.buildings) if (b.type === 'school' && b.progress == null && !b.broken) teachers += b.staff;
-    if (teachers > 0 && S.skilled < Math.floor(S.pop * 0.5)) { S.acc.edu += teachers * 0.45 * f; while (S.acc.edu >= 1) { S.acc.edu -= 1; S.skilled++; } }
+    if (teachers > 0 && S.skilled < Math.floor(S.pop * 0.5)) { S.acc.edu += teachers * 0.45 * (this.hasTech('apprentice') ? 1.5 : 1) * f; while (S.acc.edu >= 1) { S.acc.edu -= 1; S.skilled++; } }
     S.skilled = clamp(S.skilled, 0, S.pop);
   }
 
@@ -702,9 +726,9 @@ export class Sim {
     if (this.hasTech('irrigation') && t === 'farm') m *= 1.2;
     if (this.hasTech('automation') && (t === 'workshop' || t === 'mine')) m *= 1.2;
     if (t === 'hunter' && this.S.zones.north) m *= 1.4;
-    return m;
+    return m * this.lvMul(b, 'out');
   }
-  inRate(b, r) { let v = B[b.type].in[r]; if (b.type === 'farm' && r === 'water' && this.hasTech('irrigation')) v *= 0.5; return v; }
+  inRate(b, r) { let v = B[b.type].in[r] * (B[b.type].housing ? 1 : this.lvMul(b, 'out')); if (b.type === 'farm' && r === 'water' && this.hasTech('irrigation')) v *= 0.5; return v; }
   bufCap(b, r) { return Math.max(20, B[b.type].out[r] * this.outMult(b) * 1.5); }
 
   _production(dt) {
@@ -722,7 +746,7 @@ export class Sim {
       if (!b.on) { b.eff = 0; b.issue = 'Paused'; continue; }
       if (def.workers) {
         const eq = this.C.equiv[b.id] || 0;
-        const r = Math.min(1.3, (b.staff + eq) / def.workers);
+        const r = Math.min(1.3, (b.staff + eq) / this.workersOf(b));
         if (r <= 0) { b.eff = 0; b.issue = 'No workers'; continue; }
         if (r < 0.99) issue = 'Short-staffed';
         e *= r;
@@ -774,7 +798,7 @@ export class Sim {
       // fabrication queue
       if (b.type === 'fabrication' && b.queue.length && e > 0) {
         const q = b.queue[0];
-        q.progress += 5 * e * dt;
+        q.progress += 5 * e * this.lvMul(b, 'speed') * dt;
         if (q.progress >= CLICKERS[q.role].work) {
           b.queue.shift();
           const fp = footprint(b);
@@ -858,8 +882,9 @@ export class Sim {
       } else if (b.upgrade) {
         b.upgrade.progress += pts;
         if (b.upgrade.progress >= b.upgrade.work) {
-          b.type = b.upgrade.to; b.upgrade = null; b.cond = 100; b.crew = 0; this.dirty = true;
-          this.log(`Home upgraded to ${B[b.type].name}.`, 'good');
+          const u = b.upgrade; b.upgrade = null; b.cond = 100; b.crew = 0; this.dirty = true;
+          if (u.to) { b.type = u.to; this.log(`Home upgraded to ${B[b.type].name}.`, 'good'); }
+          else { b.lv = u.lv; b.slots = this.workersOf(b); this.log(`${B[b.type].name} upgraded: ${this.lvDef(b).name}.`, 'good'); }
           this.events.push({ type: 'built', id: b.id });
         }
       }
@@ -1065,7 +1090,7 @@ export class Sim {
         this._objectives();
       } else {
         const def = EXPEDITIONS[e.kind]; const got = [];
-        const bonus = 1 + 0.3 * Math.min(1, S.rigs / def.crew);
+        const bonus = (1 + 0.3 * Math.min(1, S.rigs / def.crew)) * (this.hasTech('caravans') ? 1.25 : 1);
         for (const r in def.gain) { const [a, b] = def.gain[r]; const n = Math.round((a + this.rand() * (b - a)) * bonus); this.S.res[r] = Math.min(this.cap(r), this.S.res[r] + n); got.push(`${n} ${r}`); }
         let msg = `${def.name} returned with ${got.join(', ')}.`;
         if (this.h > 0.5 && this.rand() < 0.35 * (1 - 0.6 * Math.min(1, S.rigs / def.crew))) { S.sick = Math.min(S.pop, S.sick + 2); msg += ' Two came back heat-sick.'; }
@@ -1165,5 +1190,7 @@ function migrate(S) {
   // v2: slower days. Speeds are now pause/1x/2x/4x; the map grew around the existing settlement, so
   // buildings, roads and claims carry over untouched.
   if (!(S.v >= 2)) { if (![0, 1, 2, 4].includes(S.speed)) S.speed = 1; S.v = 2; }
+  // v3: per-building upgrade levels; research now comes from buildings (with a fallback when there are none)
+  if (!(S.v >= 3)) { for (const b of S.buildings) b.lv = b.lv || 1; S.v = 3; }
   return S;
 }

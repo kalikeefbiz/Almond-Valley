@@ -144,7 +144,7 @@ export class View {
     const seen = new Set();
     for (const b of S.buildings) {
       seen.add(b.id);
-      const key = b.type + ':' + b.rot + ':' + b.x + ':' + b.z + (b.type === 'heartwell' ? JSON.stringify(S.hw.lv) : '') + (this.modelFor(b.type) ? ':m' : '');
+      const key = b.type + ':' + b.rot + ':' + b.x + ':' + b.z + (b.type === 'heartwell' ? JSON.stringify(S.hw.lv) : '') + (this.modelFor(b.type) ? ':m' : '') + ':L' + (b.lv || 1);
       let e = this.bm.get(b.id);
       if (!e || e.key !== key) { if (e) this._dropB(e); e = this._makeB(b, key); this.bm.set(b.id, e); }
       e.b = b;
@@ -205,6 +205,7 @@ export class View {
     mesh.rotation.y = b.rot * Math.PI / 2; mesh.castShadow = true; mesh.receiveShadow = true;
     mesh.userData.bid = b.id;
     group.add(mesh); e.mesh = mesh;
+    if ((b.lv || 1) > 1) { e.decor = this._levelDecor(f, b.lv, geo); group.add(e.decor); }
     const h = Math.min(8, (geo.boundingBox.max.y || 3));
     const sg = this._scafGeo || (this._scafGeo = new THREE.EdgesGeometry(new THREE.BoxGeometry(1, 1, 1)));
     const scaf = new THREE.LineSegments(sg, this._scafMat || (this._scafMat = new THREE.LineBasicMaterial({ color: 0xe8a61c })));
@@ -215,9 +216,25 @@ export class View {
     e.cx = group.position.x; e.cz = group.position.z; e.def = def;
     return e;
   }
-  _dropB(e) { this.scene.remove(e.group); if (e.ownGeo) e.ownGeo.forEach(g => g.dispose()); if (e.hw) e.hw.mats.forEach(m => m.dispose()); }
+  _dropB(e) { this.scene.remove(e.group); if (e.decor) e.decor.traverse(o => o.geometry && o.geometry.dispose()); if (e.ownGeo) e.ownGeo.forEach(g => g.dispose()); if (e.hw) e.hw.mats.forEach(m => m.dispose()); }
 
   // ---------------------------------------------------------------- overlays
+  // Visible marks of a building's upgrade level: Lv 2 adds a gold-banded iron stack,
+  // Lv 3 an aether tank on the far corner. Kept to a few primitives so many upgraded buildings stay cheap.
+  _levelDecor(f, lv, geo) {
+    const M = this._lvMats || (this._lvMats = { iron: new THREE.MeshLambertMaterial({ color: 0x3b3430 }), gold: new THREE.MeshLambertMaterial({ color: 0xe2a522 }), glass: new THREE.MeshLambertMaterial({ color: 0x4fd8f0, emissive: 0x1d7f99 }) });
+    const g = new THREE.Group(), hw = f.w * CELL / 2 - 0.55, hd = f.d * CELL / 2 - 0.55, top = Math.min(6, (geo.boundingBox && geo.boundingBox.max.y) || 3);
+    const cyl = (r, h, m) => new THREE.Mesh(new THREE.CylinderGeometry(r, r, h, 10), m);
+    const sh = top + 1.1, stack = cyl(0.2, sh, M.iron); stack.position.set(hw, sh / 2, -hd); g.add(stack);
+    for (const y of [sh * 0.45, sh - 0.35]) { const ring = cyl(0.26, 0.2, M.gold); ring.position.set(hw, y, -hd); g.add(ring); }
+    if (lv >= 3) {
+      const tank = cyl(0.45, 1.8, M.iron); tank.position.set(-hw, 0.9, -hd); g.add(tank);
+      const glass = cyl(0.38, 1.2, M.glass); glass.position.set(-hw, 1.0, -hd); glass.scale.set(1.25, 1, 1.25); g.add(glass);
+      const cap = cyl(0.52, 0.2, M.gold); cap.position.set(-hw, 1.9, -hd); g.add(cap);
+    }
+    g.traverse(o => { if (o.isMesh) o.castShadow = true; });
+    return g;
+  }
   setOverlay(mode) { this.overlayMode = mode; this.fillOverlay(); }
   fillOverlay() {
     const sim = this.sim, S = sim.S, C = sim.C, D = this.ovData;

@@ -258,24 +258,65 @@ export const CLICKERS = {
 };
 export const RIG_COST = { metal: 10, parts: 12, aether: 3 };
 
+// Research branches. Research unlocks capabilities only: it never builds or upgrades anything by itself.
+// `facility`: a completed building of that type must exist before the project can start.
+export const BRANCHES = [
+  { id: 'infra', name: 'Infrastructure' },
+  { id: 'industry', name: 'Industry & Automation' },
+  { id: 'housing', name: 'Housing & Climate' },
+  { id: 'civic', name: 'Civic Development' },
+  { id: 'trade', name: 'Trade & Logistics' },
+];
 export const TECH = {
-  insulation: { name: 'Insulated Homes', rp: 18, cost: { wood: 60, stone: 40 }, desc: 'Unlocks Tier III Insulated Homes and their upgrade.' },
-  heatshift: { name: 'Noon Curfew', rp: 10, cost: {}, desc: 'Unlocks the Noon Curfew policy: outdoor crews rest through the worst heat.' },
-  medicine: { name: 'Heat Medicine', rp: 16, cost: { food: 40 }, desc: 'Heat sickness spreads 30% slower and medics treat 50% more.' },
-  trade: { name: 'Rail Contracts', rp: 14, cost: { wood: 40 }, desc: 'Unlocks the Trade Depot for bulk rail freight.' },
-  steam: { name: 'Steam Power', rp: 20, cost: { metal: 40 }, desc: 'Unlocks the Steam Generator.' },
-  tools: { name: 'Tempered Tools', rp: 22, cost: { metal: 30, parts: 20 }, desc: '+15% output from lodges, camps, quarries and mines.' },
-  irrigation: { name: 'Drip Irrigation', rp: 20, cost: { parts: 10 }, desc: 'Farms use half the water and yield 20% more.' },
-  deepdrill: { name: 'Deep Drilling', rp: 28, cost: { metal: 60, parts: 10 }, desc: 'Unlocks Level 2 for every Heartwell system.' },
-  cooling: { name: 'Turbine Cooling Loops', rp: 24, cost: { metal: 50, parts: 15 }, req: ['steam'], desc: 'Heartwell machinery takes 40% less heat wear; turbines +15%.' },
-  fabrication: { name: 'Clicker Fabrication', rp: 34, cost: { metal: 60, parts: 30 }, req: ['tools'], desc: 'Unlocks the Fabrication Plant with Construction and Hauler Clickers.' },
-  aether: { name: 'Aether Refining', rp: 32, cost: { parts: 20 }, req: ['steam'], desc: 'Unlocks the Aether Plant.' },
-  specialists: { name: 'Clicker Specialization', rp: 38, cost: { parts: 30, aether: 20 }, req: ['fabrication'], desc: 'Unlocks Excavation, Harvesting, Agriculture and Maintenance Clickers.' },
-  climate: { name: 'Climate Control', rp: 44, cost: { parts: 20, aether: 20 }, req: ['insulation', 'aether'], desc: 'Unlocks Tier IV Climate Residences.' },
-  aquifer: { name: 'Aquifer Mapping', rp: 50, cost: { parts: 40, aether: 20 }, req: ['deepdrill'], desc: 'Unlocks Level 3 for every Heartwell system.' },
-  automation: { name: 'Industrial Automation', rp: 56, cost: { parts: 40, aether: 40 }, req: ['specialists'], desc: 'Clickers work 35% faster. Unlocks further Master Clickers.' },
+  // Infrastructure
+  steam: { branch: 'infra', name: 'Steam Power', rp: 20, cost: { metal: 40 }, desc: 'Unlocks the Steam Generator.' },
+  irrigation: { branch: 'infra', name: 'Drip Irrigation', rp: 20, cost: { parts: 10 }, desc: 'Farms use half the water and yield 20% more.' },
+  deepdrill: { branch: 'infra', name: 'Deep Drilling', rp: 28, cost: { metal: 60, parts: 10 }, desc: 'Allows Level 2 upgrades for each Heartwell system.' },
+  cooling: { branch: 'infra', name: 'Turbine Cooling Loops', rp: 24, cost: { metal: 50, parts: 15 }, req: ['steam'], desc: 'Heartwell machinery takes 40% less heat wear; turbines +15%.' },
+  aquifer: { branch: 'infra', name: 'Aquifer Mapping', rp: 50, cost: { parts: 40, aether: 20 }, req: ['deepdrill'], desc: 'Allows Level 3 upgrades for each Heartwell system.' },
+  // Industry & Automation
+  tools: { branch: 'industry', name: 'Tempered Tools', rp: 22, cost: { metal: 30, parts: 20 }, desc: '+15% output from lodges, camps, quarries and mines.' },
+  precision: { branch: 'industry', name: 'Precision Machining', rp: 30, cost: { metal: 40, parts: 20 }, req: ['tools'], facility: 'workshop', desc: 'Allows Workshops to be upgraded to Advanced Workshops.' },
+  aether: { branch: 'industry', name: 'Aether Refining', rp: 32, cost: { parts: 20 }, req: ['steam'], desc: 'Unlocks the Aether Plant.' },
+  fabrication: { branch: 'industry', name: 'Clicker Fabrication', rp: 34, cost: { metal: 60, parts: 30 }, req: ['tools'], facility: 'workshop', desc: 'Unlocks the Fabrication Plant, which builds Construction and Hauler Clickers.' },
+  specialists: { branch: 'industry', name: 'Clicker Specialization', rp: 38, cost: { parts: 30, aether: 20 }, req: ['fabrication'], facility: 'fabrication', desc: 'Fabrication Plants can build Excavation, Harvesting, Agriculture and Maintenance Clickers.' },
+  automation: { branch: 'industry', name: 'Industrial Automation', rp: 56, cost: { parts: 40, aether: 40 }, req: ['specialists'], facility: 'fabrication', desc: 'Clickers work 35% faster. Fabrication Plants can build Master Clickers and be upgraded to Assembly Lines.' },
+  // Housing & Climate
+  insulation: { branch: 'housing', name: 'Insulated Homes', rp: 18, cost: { wood: 60, stone: 40 }, desc: 'Unlocks Tier III Insulated Homes and the upgrade to them.' },
+  climate: { branch: 'housing', name: 'Climate Control', rp: 44, cost: { parts: 20, aether: 20 }, req: ['insulation', 'aether'], desc: 'Unlocks Tier IV Climate Residences.' },
+  // Civic Development
+  heatshift: { branch: 'civic', name: 'Noon Curfew', rp: 10, cost: {}, desc: 'Unlocks the Noon Curfew policy: outdoor crews rest through the worst heat.' },
+  medicine: { branch: 'civic', name: 'Heat Medicine', rp: 16, cost: { food: 40 }, desc: 'Heat sickness spreads 30% slower and medics treat 50% more.' },
+  apprentice: { branch: 'civic', name: 'Apprenticeships', rp: 16, cost: { wood: 40 }, desc: 'Schools train skilled workers 50% faster.' },
+  laboratory: { branch: 'civic', name: 'Field Laboratory', rp: 26, cost: { metal: 30, parts: 10 }, req: ['apprentice'], facility: 'school', desc: 'Allows Schools to be upgraded to Field Laboratories (more research).' },
+  // Trade & Logistics
+  trade: { branch: 'trade', name: 'Rail Contracts', rp: 14, cost: { wood: 40 }, desc: 'Unlocks the Trade Depot for bulk rail freight.' },
+  warehousing: { branch: 'trade', name: 'Racked Storage', rp: 14, cost: { wood: 50, metal: 20 }, desc: 'Allows Warehouses to be upgraded with racking (+70% storage).' },
+  caravans: { branch: 'trade', name: 'Caravan Routes', rp: 18, cost: { food: 30 }, req: ['trade'], desc: 'Expeditions bring back 25% more.' },
 };
-export const TECH_ORDER = ['insulation', 'heatshift', 'medicine', 'trade', 'steam', 'tools', 'irrigation', 'deepdrill', 'cooling', 'fabrication', 'aether', 'specialists', 'climate', 'aquifer', 'automation'];
+export const TECH_ORDER = Object.keys(TECH);
+
+// Per-building upgrade levels (housing tiers use upgradeTo instead). Level 1 is the building as placed.
+// Values are totals for that level: workers, out (output ×), rp (research ×), cap (storage ×), speed (assembly ×).
+// `tech` is only needed where noted; basic improvements cost materials and construction labour.
+export const LEVELS = {
+  workshop: [{ name: 'Frontier Workshop' },
+    { name: 'Improved Workshop', cost: { wood: 60, stone: 40, metal: 30 }, work: 50, workers: 6, out: 1.4 },
+    { name: 'Advanced Workshop', tech: 'precision', cost: { wood: 60, metal: 60, parts: 20 }, work: 80, workers: 8, out: 1.9 }],
+  school: [{ name: 'School' },
+    { name: 'Schoolhouse', cost: { wood: 80, stone: 50 }, work: 50, workers: 4 },
+    { name: 'Field Laboratory', tech: 'laboratory', cost: { stone: 60, metal: 40, parts: 15 }, work: 80, workers: 5, rp: 1.6 }],
+  office: [{ name: 'Community Office' },
+    { name: 'Records Hall', cost: { wood: 60, stone: 60, parts: 5 }, work: 50, workers: 4, rp: 1.3 }],
+  warehouse: [{ name: 'Warehouse' },
+    { name: 'Racked Warehouse', tech: 'warehousing', cost: { wood: 80, metal: 30 }, work: 50, cap: 1.7 }],
+  hunter: [{ name: "Hunter's Lodge" }, { name: "Outfitted Lodge", cost: { wood: 50, stone: 20, metal: 10 }, work: 35, out: 1.3 }],
+  lumber: [{ name: 'Lumber Camp' }, { name: 'Sawmill Camp', cost: { wood: 40, stone: 30, metal: 15 }, work: 35, out: 1.3 }],
+  quarry: [{ name: 'Quarry' }, { name: 'Terraced Quarry', cost: { wood: 50, stone: 20, metal: 20 }, work: 40, out: 1.3 }],
+  farm: [{ name: 'Canyon Farm' }, { name: 'Terraced Farm', cost: { wood: 50, stone: 40 }, work: 35, out: 1.25 }],
+  fabrication: [{ name: 'Fabrication Plant' },
+    { name: 'Assembly Line', tech: 'automation', cost: { metal: 120, parts: 60, aether: 20 }, work: 120, speed: 1.6 }],
+};
 
 export const PRICES = { water: 1, food: 2, wood: 1.5, stone: 1.5, metal: 4, parts: 9, aether: 12 };
 
@@ -333,6 +374,7 @@ export const START_BUILDINGS = [
   ['market', 28, 22, 0],
   ['betting', 32, 41, 2],
   ['watertower', 40, 35, 0],
+  ['school', 24, 32, 0],
 ];
 export const START_ROADS = [
   // ring road around the Heartwell
