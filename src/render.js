@@ -1,6 +1,6 @@
 // View: turns simulation state into the 3D scene every frame.
 import * as THREE from 'three';
-import { N, CELL, B, ZONES, NODES, NODE_RANGE, HW, CLICKERS } from './data.js';
+import { N, CELL, B, ZONES, DAY_SECONDS, NODES, NODE_RANGE, HW, CLICKERS } from './data.js';
 import { footprint, cellZone } from './sim.js';
 import { World, cellToWorld, HALF, worldToCell, terrainH } from './world.js';
 import { loadMasterClicker, poseMasterClicker } from './clickerModel.js';
@@ -25,7 +25,7 @@ export class View {
     this.pixelRatio = Math.min(window.devicePixelRatio || 1, mobile ? 1.6 : 2);
     this.scene = new THREE.Scene();
     this.camera = new THREE.PerspectiveCamera(42, 1, 1, 1900);
-    this.cam = { target: new THREE.Vector3(0, 0, 3), yaw: 0.42, pitch: 0.84, dist: 74 };
+    this.cam = { target: new THREE.Vector3(1, 0, -3), yaw: 0.42, pitch: 0.84, dist: 86 };   // opens on the settlement with the station and the line north in view
     this.world = new World(this.scene);
     this.mat = this.world.mat;
     this.geo = {}; this.bm = new Map(); this.cm = new Map();
@@ -229,12 +229,14 @@ export class View {
     const pdef = this.placing ? B[this.placing.type] : null;
     this.ovU.grid.value = mode === 'build' ? 1 : 0.35;
     for (let z = 0; z < N; z++) for (let x = 0; x < N; x++) {
-      const zone = cellZone(x, z); if (!zone) continue;
-      const i = z * N + x, claimed = zone === 'bridge' || S.zones[zone];
+      const zone = cellZone(x, z);
+      // build mode marks what can never be built (canyon rock, rail piers) apart from land waiting on a survey claim
+      if (!zone) { if (mode === 'build') set(x, z, 150, 40, 28, 120); continue; }
+      const i = z * N + x, claimed = zone !== 'pier' && S.zones[zone];
       const occ = C.occ[i];
       if (mode === 'build') {
-        if (!claimed) { set(x, z, 20, 12, 8, 70); continue; }
-        if (zone === 'bridge' && !(pdef && pdef.line)) { set(x, z, 20, 12, 8, 40); continue; }
+        if (zone === 'pier') { set(x, z, 150, 40, 28, 150); continue; }
+        if (!claimed) { set(x, z, 70, 46, 12, 120); continue; }
         if (pdef && pdef.wantsWater && C.waterCov[i]) set(x, z, 70, 170, 255, occ ? 20 : 70);
         else if (pdef && pdef.power && C.powerCov[i]) set(x, z, 255, 215, 70, occ ? 20 : 70);
         else set(x, z, 255, 225, 170, occ ? 6 : 26);
@@ -412,7 +414,7 @@ export class View {
         else if (a.errand) a.errand = null;
       }
       if (a.state === 'walk') {
-        let step = 3.4 * simH;
+        let step = 10 * simH;   // ~0.4 cells per second at 1x: an unhurried walk
         while (step > 0 && a.path.length) {
           const tx = a.path[0][0] + 0.5 + ((i % 5) - 2) * 0.08, tz = a.path[0][1] + 0.5 + ((i % 3) - 1) * 0.1;
           const dx = tx - a.x, dz = tz - a.z, d = Math.hypot(dx, dz);
@@ -434,12 +436,12 @@ export class View {
           if (B[tb.type].out && sim.C.drops.length && Math.random() < 0.6) { const d = sim.C.drops[(i + (hour | 0)) % sim.C.drops.length]; if (d.id !== tb.id) { a.errand = d.id; a.carry = true; } }
           else if (outside && budget > 0) { budget--; const f = footprint(tb); a.path = sim.pathTo(a.x + (Math.random() - 0.5) * 6, a.z + (Math.random() - 0.5) * 6, f).slice(-2); if (a.path.length) { a.state = 'walk'; } }
         }
-        if (a.mode === 'site' && Math.random() < simH * 2) { const e = this.bm.get(a.dest); if (e && this.inView(e.cx, e.cz)) this.puff((a.x - N / 2) * CELL, 0.6, (a.z - N / 2) * CELL, 'dust'); }
+        if (a.mode === 'site' && Math.random() < simH * 30) { const e = this.bm.get(a.dest); if (e && this.inView(e.cx, e.cz)) this.puff((a.x - N / 2) * CELL, 0.6, (a.z - N / 2) * CELL, 'dust'); }
       } else if (a.state === 'inside') { a.vis = false; a.state = 'at'; a.mode = 'home'; a.timer = 1; }
       // draw
       if (a.vis) {
         const moving = a.state === 'walk';
-        a.phase += moving ? simH * 26 : 0;
+        a.phase += moving ? simH * 130 : 0;
         _d.position.set((a.x - N / 2) * CELL, 0.07 + (moving ? Math.abs(Math.sin(a.phase)) * 0.07 : 0), (a.z - N / 2) * CELL);
         _d.rotation.set(0, a.dir, moving ? Math.sin(a.phase) * 0.06 : 0); _d.scale.setScalar(1.15); _d.updateMatrix();
       } else { _d.position.set(0, -50, 0); _d.scale.setScalar(0.001); _d.updateMatrix(); }
@@ -506,7 +508,7 @@ export class View {
     this.clock += dt;
     // camera
     cam.pitch = Math.max(0.3, Math.min(1.45, cam.pitch)); cam.dist = Math.max(16, Math.min(135, cam.dist));
-    cam.target.x = Math.max(-80, Math.min(80, cam.target.x)); cam.target.z = Math.max(-80, Math.min(80, cam.target.z));
+    cam.target.x = Math.max(-80, Math.min(80, cam.target.x)); cam.target.z = Math.max(-170, Math.min(80, cam.target.z));   // north far enough to follow the line out to Noon Butte
     const cp = Math.cos(cam.pitch), sp = Math.sin(cam.pitch);
     // keep the camera inside the canyon, above the terrain
     for (let i = 0; i < 40 && cam.dist > 16; i++) {
@@ -517,7 +519,7 @@ export class View {
     this.camera.position.set(cam.target.x + Math.sin(cam.yaw) * cp * cam.dist, cam.target.y + sp * cam.dist, cam.target.z + Math.cos(cam.yaw) * cp * cam.dist);
     this.camera.lookAt(cam.target);
     this.env = this.world.update(sim, this.camera, cam.target);
-    const speed = simH > 0 ? Math.min(4, simH / Math.max(1e-4, dt) / 0.8) : 0;
+    const speed = simH > 0 ? Math.min(4, simH / Math.max(1e-4, dt) / (24 / DAY_SECONDS)) : 0;   // = game speed multiplier
     // buildings: construction, smoke, heartwell
     const emit = dt * (0.5 + Math.min(2, speed) * 0.5) * (simH > 0 ? 1 : 0);
     for (const e of this.bm.values()) {

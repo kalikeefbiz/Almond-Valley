@@ -39,6 +39,11 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
 .speed button.on { background: linear-gradient(180deg, #f0b93f, #b97a16); color: #1d1308; border-color: #ffe2a0; }
 .resrow { display: flex; gap: 0; overflow-x: auto; scrollbar-width: none; padding: 3px 2px; }
 .resrow::-webkit-scrollbar { display: none; }
+/* the row scrolls sideways on phones; fade the edge so the hidden resources read as 'more this way' */
+.resrow { -webkit-mask-image: linear-gradient(90deg, #000 88%, transparent); mask-image: linear-gradient(90deg, #000 88%, transparent); }
+.resrow.end { -webkit-mask-image: none; mask-image: none; }
+/* an open sheet would otherwise cover half of the right-hand buttons and swallow taps meant for them */
+@media (max-width: 700px) { body.sheet-open #right { visibility: hidden; } }
 .chip { display: flex; align-items: center; gap: 5px; padding: 3px 9px; flex: none; border-right: 1px solid rgba(110, 82, 38, 0.5); min-height: 34px; }
 .chip:last-child { border-right: 0; }
 .chip .ic { width: 18px; height: 18px; }

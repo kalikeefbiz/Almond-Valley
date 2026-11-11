@@ -149,7 +149,12 @@ window.addEventListener('pagehide', () => game.save());
 function handleEvents() {
   const ev = game.sim.events; if (!ev.length) return;
   for (const e of ev) {
-    if (e.type === 'log') ui.toast(e.msg, e.kind);
+    if (e.type === 'log') {
+      ui.toast(e.msg, e.kind);
+      // critical decisions pause the valley; other warnings drop fast-forward back to normal speed
+      if (e.decide && game.speed > 0) { game.setSpeed(0); ui.toast('Paused — this needs your decision', 'warn'); }
+      else if ((e.kind === 'warn' || e.kind === 'crit') && game.speed > 1) game.setSpeed(1);
+    }
     else if (e.type === 'season') {
       if (e.name === 'Double Noon') ui.banner('Double Noon', 'Both suns stand overhead');
       else if (e.name === 'High Summer') ui.banner('High Summer', 'The heat is rising');
@@ -166,7 +171,11 @@ function frame(now) {
   requestAnimationFrame(frame);
   const dt = Math.min(0.1, (now - last) / 1000); last = now;
   const simH = game.speed > 0 ? dt * game.speed * 24 / DAY_SECONDS : 0;
-  if (simH > 0) game.sim.advance(simH);
+  if (simH > 0) {
+    const h0 = game.sim.hour(); game.sim.advance(simH);
+    // the start of each workday returns fast-forward to normal speed, so the morning gets the player's attention
+    if (game.speed > 1 && h0 < 6 && game.sim.hour() >= 6) game.setSpeed(1);
+  }
   input.update(dt);
   view.update(dt, simH);
   handleEvents();

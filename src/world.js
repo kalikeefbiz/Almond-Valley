@@ -1,38 +1,14 @@
 // Static world: canyon terrain, sky, twin suns, lighting, the High Noon railway.
 import * as THREE from 'three';
-import { N, CELL, NODES, BRIDGE_ROWS } from './data.js';
+import { N, CELL, NODES } from './data.js';
+import { hash, noise, sstep, terrainH, inButte, RAIL_X, RAIL_H, RAIL_END, RAIL_FAR } from './terrain.js';
+export { terrainH };
 import { makeMaterial, glowUniform, bridgeGeometry, trainGeometry, treeGeometry, rockGeometry, nodeGeometry } from './models.js';
 
 export const HALF = N * CELL / 2;
 export const cellToWorld = (c) => (c - N / 2) * CELL;            // cell corner -> world
 export const cellCenter = (c) => (c - N / 2 + 0.5) * CELL;
 export const worldToCell = (w) => Math.floor(w / CELL + N / 2);
-export const BRIDGE_H = 14;
-export const BRIDGE_Z = [cellToWorld(BRIDGE_ROWS[0] + 1), cellToWorld(BRIDGE_ROWS[2] + 1)];
-
-function hash(x, z) { const s = Math.sin(x * 127.1 + z * 311.7) * 43758.5453; return s - Math.floor(s); }
-function noise(x, z) {
-  const xi = Math.floor(x), zi = Math.floor(z), xf = x - xi, zf = z - zi;
-  const u = xf * xf * (3 - 2 * xf), v = zf * zf * (3 - 2 * zf);
-  const a = hash(xi, zi), b = hash(xi + 1, zi), c = hash(xi, zi + 1), d = hash(xi + 1, zi + 1);
-  return a + (b - a) * u + (c - a) * v + (a - b - c + d) * u * v;
-}
-const sstep = (a, b, x) => { const t = Math.max(0, Math.min(1, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
-
-export function terrainH(x, z) {
-  const n = noise(x * 0.035, z * 0.035), n2 = noise(x * 0.09 + 7, z * 0.09 + 3);
-  // the canyon runs north to the horizon; the south end closes into a basin
-  const north = Math.max(0, -z - 66);
-  const dx = Math.abs(x) - (65 + 5 * Math.sin(z * 0.045 + (x > 0 ? 0 : 2)) + 5 * (n - 0.5) - Math.min(26, north * 0.16));
-  const dz = z > 0 ? z - (67 + 5 * Math.sin(x * 0.05 + 1) + 5 * (n - 0.5)) : -40;
-  const d = dx > 0 && dz > 0 ? Math.hypot(dx, dz) : Math.max(dx, dz);
-  const rise = north > 8 ? Math.min(14, (north - 8) * 0.07) + n2 * Math.min(1.2, north * 0.03) : 0;
-  if (d <= -3) return rise;
-  if (d <= 0) return Math.max(rise, (d + 3) / 3 * 0.5 * n2);
-  let base = 46 * sstep(0, 1, d / 28) + (d > 28 ? Math.min(16, (d - 28) * 0.06) + 7 * (n - 0.5) : 0) + 0.5;
-  const s = base / 8, f = Math.floor(s), fr = s - f;
-  return Math.max(rise, (f + sstep(0.3, 0.95, fr)) * 8 + n2 * 1.6);
-}
 
 const _c = new THREE.Color(), _c2 = new THREE.Color();
 const BANDS = [0xa25a3a, 0xbd7046, 0xa95f3c, 0xcb8a58, 0x96503a, 0xb8744c, 0xc28055];
@@ -58,7 +34,7 @@ export class World {
       const x = P.getX(i), z = P.getZ(i), h = terrainH(x, z);
       P.setY(i, h);
       const n = noise(x * 0.15, z * 0.15), n2 = noise(x * 0.04 + 9, z * 0.04);
-      if (h < 0.6 || (z < -70 && h < 15.5 && Math.abs(x) < 46)) { _c.set(0xb98458).lerp(_c2.set(0x9a6a44), n * 0.7 + n2 * 0.3); if (h > 0.05) _c.multiplyScalar(0.9); }
+      if (h < 0.6 || (z < -70 && h < 15.5 && Math.abs(x) < 46 && !inButte(x, z))) { _c.set(0xb98458).lerp(_c2.set(0x9a6a44), n * 0.7 + n2 * 0.3); if (h > 0.05) _c.multiplyScalar(0.9); }
       else if (h > 43) _c.set(0x7f8c46).lerp(_c2.set(0xa98f58), n2 * 0.8 + n * 0.3).multiplyScalar(0.9 + n * 0.2);
       else { const band = Math.floor((h + n * 3) / 5.3); _c.set(BANDS[((band % BANDS.length) + BANDS.length) % BANDS.length]).multiplyScalar(0.82 + n * 0.3); }
       col[i * 3] = _c.r; col[i * 3 + 1] = _c.g; col[i * 3 + 2] = _c.b;
@@ -144,19 +120,28 @@ export class World {
   }
 
   _rail() {
-    const len = 176;
-    this.trains = [];
-    BRIDGE_Z.forEach((z, i) => {
-      const bm = makeMaterial({ transparent: true });
-      const b = new THREE.Mesh(bridgeGeometry(len, BRIDGE_H), bm);
-      b.position.set(0, 0, z); b.castShadow = true; b.matrixAutoUpdate = false; b.updateMatrix(); this.scene.add(b);
-      this.bridges = this.bridges || []; this.bridges.push({ mesh: b, mat: bm, z });
-      // tunnel portals in the canyon walls
-      for (const s of [-1, 1]) {
-        const p = new THREE.Mesh(new THREE.BoxGeometry(5, 7, 6), new THREE.MeshBasicMaterial({ color: 0x120c0a, fog: true }));
-        p.position.set(s * (len / 2 + 0.5), BRIDGE_H + 3.2, z); this.scene.add(p);
-      }
-    });
+    // One elevated line: from the buffer stop over the station lift, north across the flats, through Noon Butte
+    // and on up the canyon toward the outside world.
+    const len = RAIL_END - RAIL_FAR, cz = (RAIL_END + RAIL_FAR) / 2;
+    const bm = makeMaterial({ transparent: true });
+    const deck = new THREE.Mesh(bridgeGeometry(len, RAIL_H), bm);
+    deck.position.set(RAIL_X, 0, cz); deck.rotation.y = Math.PI / 2; deck.castShadow = true; deck.matrixAutoUpdate = false; deck.updateMatrix(); this.scene.add(deck);
+    this.bridges = [{ mesh: deck, mat: bm }];
+    // buffer stop
+    const stop = new THREE.Mesh(new THREE.BoxGeometry(3.2, 1.3, 0.8), new THREE.MeshLambertMaterial({ color: 0xe0a21e }));
+    stop.position.set(RAIL_X, RAIL_H + 1.1, RAIL_END - 0.3); this.scene.add(stop);
+    // tunnel portals where the line enters and leaves the butte
+    const face = (from, to, step) => { for (let z = from; step < 0 ? z > to : z < to; z += step) if (terrainH(RAIL_X, z) > RAIL_H + 7 && terrainH(RAIL_X - 4, z) > RAIL_H + 5 && terrainH(RAIL_X + 4, z) > RAIL_H + 5) return z; return null; };
+    const stoneM = new THREE.MeshLambertMaterial({ color: 0x8a7462 }), darkM = new THREE.MeshBasicMaterial({ color: 0x0d0907 });
+    this.portals = [];
+    for (const [z, dir] of [[face(-110, -200, -0.5), 1], [face(-215, -120, 0.5), -1]]) {
+      if (z == null) continue;
+      const g = new THREE.Group(); g.position.set(RAIL_X, RAIL_H, z + dir * 0.6);
+      const arch = new THREE.Mesh(new THREE.BoxGeometry(8.4, 9, 2.4), stoneM); arch.position.y = 4; g.add(arch);
+      const hole = new THREE.Mesh(new THREE.BoxGeometry(5.4, 6.4, 2.5), darkM); hole.position.set(0, 2.7, dir * 0.05); g.add(hole);
+      const lintel = new THREE.Mesh(new THREE.BoxGeometry(9.2, 0.7, 2.8), new THREE.MeshLambertMaterial({ color: 0xc9951f })); lintel.position.y = 8.6; g.add(lintel);
+      this.scene.add(g); this.portals.push(z);
+    }
     const t = new THREE.Mesh(trainGeometry(), this.mat); t.castShadow = true; t.visible = false;
     this.scene.add(t); this.train = t;
     this.trainSmoke = new THREE.Vector3();
@@ -210,23 +195,26 @@ export class World {
     this.hemi.color.set(0x7888d8).lerp(_c.set(0xffe6c8), day);
     this.hemi.groundColor.set(0x43365a).lerp(_c.set(0x9a6a48), day);
     glowUniform.value = 1.5 - day * 1.15;
-    // fade a bridge when it stands between the camera and what the player is looking at
+    // fade the viaduct when it stands between the camera and what the player is looking at
     for (const b of this.bridges) {
-      const between = (cam.position.z - b.z) * (target.z - b.z) < 0 && Math.abs(cam.position.z - b.z) > 3;
+      // only when the line of sight actually passes under/through the deck
+      let between = false; const cx = cam.position.x, tx = target.x;
+      if ((cx - RAIL_X) * (tx - RAIL_X) < 0) { const t = (RAIL_X - cx) / (tx - cx), zc = cam.position.z + t * (target.z - cam.position.z), yc = cam.position.y + t * (target.y - cam.position.y); between = zc < RAIL_END + 3 && zc > RAIL_FAR && yc < RAIL_H + 9; }
       const want = between ? 0.16 : 1;
       b.mat.opacity += (want - b.mat.opacity) * 0.15; b.mat.depthWrite = b.mat.opacity > 0.9; b.mesh.castShadow = b.mat.opacity > 0.9;
     }
-    // train
+    // train: runs in from the north, stops with its nose at the station lift, then pulls back out the way it came
+    // (a locomotive at each end, so it leads both ways). Times are in game hours.
     const S = sim.S, tr = this.train;
     const since = S.time - S.train.at, until = S.train.next - S.time;
-    const stopX = cellCenter(32) + 4, z = BRIDGE_Z[0];
-    let x = null;
-    if (until < 1.6) x = stopX + 130 * Math.pow(until / 1.6, 1.6) + 0.01;   // arriving from the east
-    else if (since >= 0 && since < 5) x = stopX;
-    else if (since >= 5 && since < 6.6) x = stopX - 150 * Math.pow((since - 5) / 1.6, 1.8);
-    tr.visible = x !== null;
-    if (x !== null) { tr.position.set(x, BRIDGE_H + 0.5, z); tr.rotation.y = Math.PI; this.trainSmoke.set(x - 1.6, BRIDGE_H + 4.6, z); }
-    this.trainMoving = x !== null && !(since >= 0 && since < 5);
+    const stopZ = RAIL_END - 4.2;
+    let z = null, out = false;
+    if (until < 1.2) z = stopZ - 290 * Math.pow(until / 1.2, 1.7);
+    else if (since >= 0 && since < 5) z = stopZ;
+    else if (since >= 5 && since < 6.4) { z = stopZ - 300 * Math.pow((since - 5) / 1.4, 1.8); out = true; }
+    tr.visible = z !== null && z > RAIL_FAR - 10;
+    if (z !== null) { tr.position.set(RAIL_X, RAIL_H + 0.5, z); tr.rotation.y = -Math.PI / 2; this.trainSmoke.set(RAIL_X, RAIL_H + 4.6, out ? z - 33.6 : z + 1.6); }
+    this.trainMoving = tr.visible && !(since >= 0 && since < 5);
     return { day, heat, dn, dusk };
   }
 

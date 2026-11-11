@@ -461,13 +461,16 @@ export function bridgeGeometry(len, height) {
 export function trainGeometry() {
   seed = 55;
   const g = new G();
-  // locomotive at +x, cars trail to -x
-  g.box(0, 0.5, 0, 5.2, 0.5, 2.0, PAL.alloy);
-  g.cyl(0.9, 1.9, 0, 0.85, 3.2, PAL.alloy, { rz: Math.PI / 2, seg: 12 }); g.cyl(2.45, 1.9, 0, 0.9, 0.2, PAL.yellow, { rz: Math.PI / 2, seg: 12 });
-  g.box(-1.6, 1.0, 0, 1.9, 2.2, 2.0, PAL.yellow); g.box(-1.6, 3.2, 0, 2.2, 0.15, 2.3, PAL.alloy);
-  for (const s of [-1, 1]) g.box(-1.6, 2.2, s * 1.01, 1.2, 0.6, 0.04, PAL.glow, { glow: 2, flat: true });
-  g.stack(1.6, 2.6, 0, 1.3, 0.3); g.box(2.65, 1.0, 0, 0.1, 0.5, 0.5, PAL.glow, { glow: 3, flat: true });
-  g.box(2.9, 0.4, 0, 0.6, 0.6, 1.9, PAL.yellowD, { rz: -0.5 });
+  // locomotive at +x, cars trail to -x, a second locomotive at the tail facing the other way
+  const loco = (o, f) => {
+    g.box(o + f * 0, 0.5, 0, 5.2, 0.5, 2.0, PAL.alloy);
+    g.cyl(o + f * 0.9, 1.9, 0, 0.85, 3.2, PAL.alloy, { rz: Math.PI / 2, seg: 12 }); g.cyl(o + f * 2.45, 1.9, 0, 0.9, 0.2, PAL.yellow, { rz: Math.PI / 2, seg: 12 });
+    g.box(o - f * 1.6, 1.0, 0, 1.9, 2.2, 2.0, PAL.yellow); g.box(o - f * 1.6, 3.2, 0, 2.2, 0.15, 2.3, PAL.alloy);
+    for (const s of [-1, 1]) g.box(o - f * 1.6, 2.2, s * 1.01, 1.2, 0.6, 0.04, PAL.glow, { glow: 2, flat: true });
+    g.stack(o + f * 1.6, 2.6, 0, 1.3, 0.3); g.box(o + f * 2.65, 1.0, 0, 0.1, 0.5, 0.5, PAL.glow, { glow: 3, flat: true });
+    g.box(o + f * 2.9, 0.4, 0, 0.6, 0.6, 1.9, PAL.yellowD, { rz: -0.5 * f });
+  };
+  loco(0, 1); loco(-31.4, -1);
   for (let i = 0; i < 4; i++) {
     const x = -6.6 - i * 6.2, cargo = i % 2 === 1;
     g.box(x, 0.5, 0, 5.6, 0.4, 2.0, PAL.alloy);

@@ -3,7 +3,8 @@
 export const N = 64;          // grid cells per side
 export const CELL = 2;        // world units per cell
 export const YEAR = 48;       // days per seasonal cycle
-export const DAY_SECONDS = 30; // real seconds per game day at 1x
+export const DAY_SECONDS = 570; // real seconds per game day at 1x (about 9.5 minutes, a deliberate management pace)
+export const BUILD_PACE = 2;    // construction labour per worker-hour; days are long now, so crews work at a believable hourly rate
 
 export const RES = ['water', 'food', 'wood', 'stone', 'metal', 'parts', 'aether', 'scrip'];
 export const RES_INFO = {
@@ -21,31 +22,32 @@ export const RES_INFO = {
 export const BASE_CAP = { food: 900, wood: 900, stone: 900, metal: 700, parts: 250, aether: 160, scrip: 99999 };
 export const WAREHOUSE_CAP = { food: 600, wood: 600, stone: 600, metal: 500, parts: 200, aether: 140 };
 
-// Territory. Core is the settled ground between the two High Noon bridges.
+// Territory. Almond Valley ('core') is all open valley floor not covered by a survey claim; claims are the
+// distant pockets holding the valuable deposits. Canyon rock (see terrain.js) is never buildable.
+// cellZone() checks the claims first, so their rectangles carve pockets out of the core.
 export const ZONES = {
-  core: { name: 'Almond Valley', x0: 20, z0: 20, x1: 43, z1: 43 },
+  core: { name: 'Almond Valley', x0: 0, z0: 0, x1: N - 1, z1: N - 1 },
   north: {
-    name: 'North Ridge', x0: 10, z0: 4, x1: 53, z1: 17,
+    name: 'North Ridge', x0: 1, z0: 1, x1: 62, z1: 7,
     cost: { wood: 120, stone: 80, food: 60 }, crew: 5, days: 2,
-    desc: 'Hunting grounds past the north bridge. Richer game, timber and a stone shelf.',
+    desc: 'Hunting grounds under the north rim. Richer game, timber and a stone shelf.',
   },
   west: {
-    name: 'Works Yard', x0: 4, z0: 20, x1: 19, z1: 43,
+    name: 'Works Yard', x0: 1, z0: 8, x1: 7, z1: 51,
     cost: { wood: 100, stone: 120, food: 60 }, crew: 5, days: 2,
     desc: 'Under the western highlands. Dense timber stands for large lumber operations.',
   },
   east: {
-    name: 'East Canyon', x0: 44, z0: 20, x1: 59, z1: 43,
+    name: 'East Canyon', x0: 56, z0: 8, x1: 62, z1: 51,
     cost: { wood: 160, stone: 100, food: 80 }, crew: 6, days: 3,
     desc: 'Iron seams in the canyon wall. The only local source of ore.',
   },
   south: {
-    name: 'Lower Flats', x0: 10, z0: 46, x1: 53, z1: 59,
+    name: 'Lower Flats', x0: 1, z0: 52, x1: 62, z1: 62,
     cost: { wood: 180, stone: 160, metal: 60, food: 100 }, crew: 6, days: 3,
-    desc: 'Open ground past the south bridge, split by aether vents.',
+    desc: 'Open ground at the south end of the basin, split by aether vents.',
   },
 };
-export const BRIDGE_ROWS = [18, 19, 44, 45];
 
 // Resource deposits. Extractors must sit within NODE_RANGE cells of one.
 export const NODE_RANGE = 5;
@@ -56,11 +58,11 @@ export const NODES = [
   { id: 'wtimber2', type: 'forest', x: 5, z: 38, rich: 1.8, zone: 'west' },
   { id: 'ore1', type: 'ore', x: 57, z: 26, rich: 1.0, zone: 'east' },
   { id: 'ore2', type: 'ore', x: 57, z: 38, rich: 1.4, zone: 'east' },
-  { id: 'erock', type: 'rock', x: 50, z: 42, rich: 1.5, zone: 'east' },
+  { id: 'erock', type: 'rock', x: 58, z: 46, rich: 1.5, zone: 'east' },
   { id: 'vent1', type: 'vent', x: 20, z: 54, rich: 1.0, zone: 'south' },
   { id: 'vent2', type: 'vent', x: 42, z: 56, rich: 1.4, zone: 'south' },
-  { id: 'nrock', type: 'rock', x: 14, z: 8, rich: 1.4, zone: 'north' },
-  { id: 'ntimber', type: 'forest', x: 48, z: 6, rich: 1.4, zone: 'north' },
+  { id: 'nrock', type: 'rock', x: 14, z: 3, rich: 1.4, zone: 'north' },
+  { id: 'ntimber', type: 'forest', x: 48, z: 3, rich: 1.4, zone: 'north' },
 ];
 export const NODE_NAMES = { forest: 'Timber stand', rock: 'Stone shelf', ore: 'Iron seam', vent: 'Aether vent' };
 
@@ -246,13 +248,13 @@ export const HW = {
 };
 
 export const CLICKERS = {
-  master: { name: 'Master Clicker', desc: 'Builds, repairs and hauls.', aether: 2, cost: { metal: 220, parts: 90, aether: 40 }, work: 160, tech: 'automation', speed: 5, build: 12, repair: 40, load: 50 },
-  construction: { name: 'Construction Clicker', desc: 'Builds and upgrades structures.', aether: 1, cost: { metal: 80, parts: 30, aether: 10 }, work: 70, tech: 'fabrication', speed: 5, build: 10 },
-  hauler: { name: 'Hauler Clicker', desc: 'Carries goods from worksites to storage.', aether: 1, cost: { metal: 70, parts: 25, aether: 10 }, work: 60, tech: 'fabrication', speed: 6, load: 90 },
-  excavation: { name: 'Excavation Clicker', desc: 'Works a quarry or mine like five labourers.', aether: 1.2, cost: { metal: 100, parts: 40, aether: 15 }, work: 80, tech: 'specialists', speed: 4, equiv: 5 },
-  harvesting: { name: 'Harvesting Clicker', desc: 'Works a lumber camp like five labourers.', aether: 1, cost: { metal: 80, parts: 30, aether: 12 }, work: 70, tech: 'specialists', speed: 5, equiv: 5 },
-  agriculture: { name: 'Agriculture Clicker', desc: 'Works a farm like four labourers.', aether: 1, cost: { metal: 70, parts: 30, aether: 12 }, work: 70, tech: 'specialists', speed: 5, equiv: 4 },
-  maintenance: { name: 'Maintenance Clicker', desc: 'Repairs machinery and buildings.', aether: 1, cost: { metal: 60, parts: 40, aether: 15 }, work: 70, tech: 'specialists', speed: 5, repair: 45 },
+  master: { name: 'Master Clicker', desc: 'Builds, repairs and hauls.', aether: 2, cost: { metal: 220, parts: 90, aether: 40 }, work: 160, tech: 'automation', speed: 15, build: 12, repair: 40, load: 50 },
+  construction: { name: 'Construction Clicker', desc: 'Builds and upgrades structures.', aether: 1, cost: { metal: 80, parts: 30, aether: 10 }, work: 70, tech: 'fabrication', speed: 15, build: 10 },
+  hauler: { name: 'Hauler Clicker', desc: 'Carries goods from worksites to storage.', aether: 1, cost: { metal: 70, parts: 25, aether: 10 }, work: 60, tech: 'fabrication', speed: 18, load: 90 },
+  excavation: { name: 'Excavation Clicker', desc: 'Works a quarry or mine like five labourers.', aether: 1.2, cost: { metal: 100, parts: 40, aether: 15 }, work: 80, tech: 'specialists', speed: 12, equiv: 5 },
+  harvesting: { name: 'Harvesting Clicker', desc: 'Works a lumber camp like five labourers.', aether: 1, cost: { metal: 80, parts: 30, aether: 12 }, work: 70, tech: 'specialists', speed: 15, equiv: 5 },
+  agriculture: { name: 'Agriculture Clicker', desc: 'Works a farm like four labourers.', aether: 1, cost: { metal: 70, parts: 30, aether: 12 }, work: 70, tech: 'specialists', speed: 15, equiv: 4 },
+  maintenance: { name: 'Maintenance Clicker', desc: 'Repairs machinery and buildings.', aether: 1, cost: { metal: 60, parts: 40, aether: 15 }, work: 70, tech: 'specialists', speed: 15, repair: 45 },
 };
 export const RIG_COST = { metal: 10, parts: 12, aether: 3 };
 

@@ -1,6 +1,8 @@
 // Headless gameplay tests: node test/sim.test.mjs
-import { Sim, footprint } from '../src/sim.js';
-import { B, N, YEAR, TECH } from '../src/data.js';
+import { Sim, footprint, cellZone } from '../src/sim.js';
+import { B, N, YEAR, TECH, ZONES } from '../src/data.js';
+import { CANYON, PIER_CELLS } from '../src/terrain.js';
+import { readFileSync } from 'node:fs';
 
 let fails = 0;
 const ok = (c, m) => { if (!c) { fails++; console.log('  FAIL', m); } else console.log('  ok  ', m); };
@@ -29,7 +31,7 @@ console.log('--- construction + costs');
   const r = s.place('frontier', spot[0], spot[1], 0);
   ok(r.ok && S.res.wood === wood0 - 30, 'placing deducts cost');
   ok(!s.canPlace('frontier', spot[0], spot[1], 0).ok, 'cannot overlap');
-  ok(!s.canPlace('frontier', 5, 5, 0).ok, 'cannot build in unclaimed zone');
+  ok(!s.canPlace('frontier', 3, 30, 0).ok, 'cannot build in unclaimed survey zone');
   ok(!s.canPlace('insulated', 20, 20, 0).ok, 'tier III locked by research');
   const b = s.byId(r.id);
   s.advance(24);
@@ -117,5 +119,38 @@ ok(act.S.summers === 2, 'two Double Noons recorded');
 console.log('  clickers:', act.S.clickers.map(c => c.role + ':' + (c.task ? c.task.kind : '-') + ':' + c.cond.toFixed(0)).join(' '), 'mine', act.count('mine'), 'hw', JSON.stringify(act.S.hw.lv), JSON.stringify(act.S.hw.cond));
 console.log('  techs:', Object.keys(act.S.tech.done).join(','));
 console.log('  log:', act.S.log.slice(0, 12).map(l => l.msg).join(' | '));
+
+console.log('--- expanded valley + railway right of way');
+{
+  const s = new Sim(); const S = s.S;
+  let open = 0, oldCore = 0;
+  for (let z = 0; z < N; z++) for (let x = 0; x < N; x++) { const zn = cellZone(x, z); if (zn === 'core') { open++; if (x >= 20 && x <= 43 && z >= 20 && z <= 43) oldCore++; } }
+  console.log('  buildable core cells', open, '(old core', oldCore + ')');
+  ok(open > 1600, 'core is several times the old 24x24 zone');
+  for (const [x, z] of [[10, 12], [50, 12], [12, 48], [48, 48], [31, 10], [30, 46]]) ok(s.canPlace('frontier', x, z, 0).ok, `open ground buildable at ${x},${z}: ` + s.canPlace('frontier', x, z, 0).reason);
+  ok(s.canPlace('road', 33, 10, 0).ok, 'roads can run under the viaduct between piers');
+  const pier = [...PIER_CELLS][3], px = pier % N, pz = (pier / N) | 0;
+  ok(/pier/i.test(s.canPlace('frontier', px, pz, 0).reason || ''), 'piers block building with a clear reason');
+  const rock = [...CANYON.keys()].find(i => CANYON[i] && (i % N) > 2 && (i % N) < 61 && ((i / N) | 0) > 20 && ((i / N) | 0) < 44);
+  if (rock != null) ok(/canyon/i.test(s.canPlace('frontier', rock % N, (rock / N) | 0, 0).reason || ''), 'canyon rock blocked with a clear reason');
+  ok(/claim East Canyon/.test(s.canPlace('frontier', 58, 30, 0).reason || ''), 'distant deposits still need a survey claim');
+  // a house far from the old core still gets built and housed
+  const r = s.place('frontier', 12, 48, 0); s.advance(24 * 2);
+  ok(s.byId(r.id).progress == null, 'house on newly opened ground gets built');
+  const lumber = s.canPlace('lumber', 9, 12, 0);
+  console.log('  roads reach new ground:', s.pathTo(26, 30, footprint(s.byId(r.id))).length, 'steps');
+}
+
+console.log('--- old save migration');
+{
+  const old = JSON.parse(readFileSync(new URL('./fixtures-v1-save.json', import.meta.url)));
+  const n0 = old.buildings.length, roads0 = old.roads.reduce((a, b) => a + b, 0), pop0 = old.pop;
+  const s = new Sim(JSON.parse(JSON.stringify(old)));
+  ok(s.S.v === 2 && [0, 1, 2, 4].includes(s.S.speed), 'v1 save migrated (speed ' + old.speed + ' -> ' + s.S.speed + ')');
+  ok(s.S.buildings.length === n0 && s.S.roads.reduce((a, b) => a + b, 0) === roads0, 'buildings and roads preserved');
+  s.advance(24 * 3);
+  ok(!s.S.over && s.S.pop >= pop0 - 5, `old settlement keeps running (pop ${pop0} -> ${s.S.pop})`);
+}
+
 console.log(fails ? `\n${fails} FAILED` : '\nALL PASSED');
 process.exit(fails ? 1 : 0);

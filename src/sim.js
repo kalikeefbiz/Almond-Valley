@@ -1,12 +1,13 @@
 // Almond Valley simulation. Pure state + rules, no rendering. Runs in the browser and in node tests.
 import {
-  N, YEAR, RES, BASE_CAP, WAREHOUSE_CAP, ZONES, BRIDGE_ROWS, NODES, NODE_RANGE, B, PRIO_ORDER, HW, CLICKERS,
+  N, YEAR, RES, BASE_CAP, WAREHOUSE_CAP, ZONES, BUILD_PACE, NODES, NODE_RANGE, B, PRIO_ORDER, HW, CLICKERS,
   RIG_COST, TECH, PRICES, EXPEDITIONS, seasonTemp, seasonName, START_BUILDINGS, START_ROADS, START_PIPES,
 } from './data.js';
 import { findPath } from './path.js';
+import { CANYON, PIER_CELLS } from './terrain.js';
 
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
-export const SAVE_VERSION = 1;
+export const SAVE_VERSION = 2;
 
 export function footprint(b) {
   const def = B[b.type];
@@ -24,9 +25,10 @@ function rectRectCheb(a, b) {
   return Math.max(dx, dz);
 }
 export function cellZone(x, z) {
-  if (BRIDGE_ROWS.includes(z)) return x >= 10 && x <= 53 ? 'bridge' : null;
-  for (const k in ZONES) { const q = ZONES[k]; if (x >= q.x0 && x <= q.x1 && z >= q.z0 && z <= q.z1) return k; }
-  return null;
+  if (x < 0 || z < 0 || x >= N || z >= N || CANYON[z * N + x]) return null;
+  if (PIER_CELLS.has(z * N + x)) return 'pier';
+  for (const k in ZONES) { if (k === 'core') continue; const q = ZONES[k]; if (x >= q.x0 && x <= q.x1 && z >= q.z0 && z <= q.z1) return k; }
+  return 'core';
 }
 export function costText(cost) { return Object.entries(cost || {}).map(([k, v]) => `${v} ${k}`).join(', '); }
 
@@ -81,11 +83,12 @@ export class Sim {
     t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   }
-  log(msg, kind = 'info') {
+  // decide: the player has to act (the game pauses itself); warn/crit without it drop fast-forward back to 1x.
+  log(msg, kind = 'info', decide = false) {
     const S = this.S;
     S.log.unshift({ d: this.day() + 1, msg, kind });
     if (S.log.length > 40) S.log.length = 40;
-    this.events.push({ type: 'log', msg, kind });
+    this.events.push({ type: 'log', msg, kind, decide });
   }
   day() { return Math.floor(this.S.time / 24); }
   hour() { return this.S.time % 24; }
@@ -234,7 +237,7 @@ export class Sim {
     }
     // --- walk grid
     const blocked = new Uint8Array(N * N);
-    for (let i = 0; i < N * N; i++) if (occ[i]) blocked[i] = 1;
+    for (let i = 0; i < N * N; i++) if (occ[i] || CANYON[i] || PIER_CELLS.has(i)) blocked[i] = 1;
     C.blocked = blocked;
     C.staffList = S.buildings.filter(b => B[b.type].workers).sort((a, b) => (b.prio - a.prio) || ((PRIO_ORDER[a.type] || 9) - (PRIO_ORDER[b.type] || 9)) || (a.id - b.id));
     C.equiv = C.equiv || {};
@@ -260,9 +263,9 @@ export class Sim {
     for (let cz = f.z; cz < f.z + f.d; cz++) for (let cx = f.x; cx < f.x + f.w; cx++) {
       if (cx < 1 || cz < 1 || cx >= N - 1 || cz >= N - 1) return { ok: false, reason: 'Outside the valley floor' };
       const zone = cellZone(cx, cz);
-      if (!zone) return { ok: false, reason: 'Canyon wall' };
-      if (zone === 'bridge') { if (!def.line) return { ok: false, reason: 'Under the railway — roads and mains only' }; }
-      else if (!S.zones[zone]) return { ok: false, reason: `Claim ${ZONES[zone].name} first` };
+      if (!zone) return { ok: false, reason: 'Canyon rock — the valley floor ends here' };
+      if (zone === 'pier') return { ok: false, reason: 'Railway pier in the way' };
+      if (!S.zones[zone]) return { ok: false, reason: `Survey needed: claim ${ZONES[zone].name} from Expedition` };
       const i = cz * N + cx;
       if (type === 'pipe') { if (S.pipes[i]) return { ok: false, reason: 'Main already here' }; if (this.C.occ[i] === -1) return { ok: false, reason: 'Blocked by deposit' }; continue; }
       if (this.C.occ[i]) return { ok: false, reason: this.C.occ[i] === -1 ? 'Blocked by deposit' : 'Space occupied' };
@@ -493,6 +496,10 @@ export class Sim {
     this._clickers(dt);
     this._research(dt);
     this._world(dt);
+    // reserve warning (with hysteresis so it fires once per shortage)
+    const wf = S.res.water / Math.max(1, this.C.waterCap);
+    if (!S.lowWater && wf < 0.2) { S.lowWater = true; this.log('Water reserves below 20%. Cut use or raise extraction.', 'warn'); }
+    else if (S.lowWater && wf > 0.35) S.lowWater = false;
     // flows (per day, smoothed over ~6 game hours)
     const k = 1 - Math.exp(-dt / 6);
     for (const r of RES) { S.flow[r] += ((this.fd[r] / dt * 24) - S.flow[r]) * k; this.fd[r] = 0; }
@@ -839,7 +846,7 @@ export class Sim {
     for (const c of S.clickers) if (c.task && c.task.kind === 'build' && c.state === 'act' && !c.dormant && !c.broken) builders[c.task.bid] = (builders[c.task.bid] || 0) + CLICKERS[c.role].build * (this.hasTech('automation') ? 1.35 : 1);
     for (const b of sites) {
       const crew = Math.min(6, humans); humans -= crew;
-      const pts = (crew * 1.0 * labour + (builders[b.id] || 0)) * dt;
+      const pts = (crew * 1.0 * labour + (builders[b.id] || 0)) * BUILD_PACE * dt;
       b.crew = crew;
       if (b.progress != null) {
         b.progress += pts;
@@ -885,7 +892,7 @@ export class Sim {
     const equiv = {};
     const auto = this.hasTech('automation') ? 1.35 : 1;
     const noAether = S.res.aether <= 0;
-    if (noAether && !this._aetherWarned && S.clickers.length) { this._aetherWarned = true; this.log('Aether cells exhausted — Clickers have gone dormant.', 'crit'); }
+    if (noAether && !this._aetherWarned && S.clickers.length) { this._aetherWarned = true; this.log('Aether cells exhausted — Clickers have gone dormant.', 'crit', true); }
     if (!noAether) this._aetherWarned = false;
     const claimed = {};
     for (const c of S.clickers) if (c.task && c.task.kind !== 'idle' && c.task.kind !== 'work') claimed[c.task.kind + c.task.bid + (c.task.comp || '')] = (claimed[c.task.kind + c.task.bid + (c.task.comp || '')] || 0) + 1;
@@ -1069,14 +1076,14 @@ export class Sim {
 
   _daily() {
     const S = this.S, hw = S.hw;
-    if (S.dayDeaths > 0) { this.log(`${S.dayDeaths} resident${S.dayDeaths > 1 ? 's' : ''} died yesterday.`, 'crit'); S.dayDeaths = 0; }
+    if (S.dayDeaths > 0) { this.log(`${S.dayDeaths} resident${S.dayDeaths > 1 ? 's' : ''} died yesterday.`, 'crit', true); S.dayDeaths = 0; }
     // breakdowns
     for (const b of S.buildings) {
       if (b.progress != null || b.broken || !B[b.type].wear || B[b.type].housing) continue;
       if (b.cond < 30 && this.rand() < (30 - b.cond) / 30 * 0.6) { b.broken = true; this.dirty = true; this.log(`${B[b.type].name} has broken down.`, 'warn'); this.events.push({ type: 'broke', id: b.id }); }
     }
     for (const c in hw.cond) {
-      if (!hw.broken[c] && hw.cond[c] < 30 && this.rand() < (30 - hw.cond[c]) / 30 * 0.6) { hw.broken[c] = true; this.log(`Heartwell failure: ${HW.comps[c]} is down.`, 'crit'); this.events.push({ type: 'broke', id: this.C.hw.id }); }
+      if (!hw.broken[c] && hw.cond[c] < 30 && this.rand() < (30 - hw.cond[c]) / 30 * 0.6) { hw.broken[c] = true; this.log(`Heartwell failure: ${HW.comps[c]} is down.`, 'crit', true); this.events.push({ type: 'broke', id: this.C.hw.id }); }
     }
     S.hist.push({ d: this.day(), t: Math.round(seasonTemp(this.doy(), this.year())), w: Math.round(S.res.water), f: Math.round(S.res.food), p: S.pop, m: Math.round(S.morale), x: S.deaths });
     if (S.hist.length > 120) S.hist.shift();
@@ -1155,5 +1162,8 @@ function migrate(S) {
   for (const b of S.buildings) { if (b.type === 'fabrication' && !b.queue) b.queue = []; if (!b.out) b.out = {}; }
   for (const c of S.clickers) { c.path = c.path || []; }
   S.over = !!S.over;
+  // v2: slower days. Speeds are now pause/1x/2x/4x; the map grew around the existing settlement, so
+  // buildings, roads and claims carry over untouched.
+  if (!(S.v >= 2)) { if (![0, 1, 2, 4].includes(S.speed)) S.speed = 1; S.v = 2; }
   return S;
 }

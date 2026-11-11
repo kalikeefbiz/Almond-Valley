@@ -34,8 +34,9 @@ export function bindInput(canvas, view, h) {
     }
     if (pts.size !== 1) return;
     const dx = e.clientX - last.x, dy = e.clientY - last.y;
-    moved += Math.abs(dx) + Math.abs(dy);
-    if (mode === 'pending' && moved > 9) mode = h.dragStart && h.dragStart(p.sx, p.sy) ? 'custom' : 'pan';
+    // distance from where the finger landed, so normal fingertip jitter still counts as a tap
+    moved = Math.max(moved, Math.hypot(e.clientX - p.sx, e.clientY - p.sy));
+    if (mode === 'pending' && moved > 14) mode = h.dragStart && h.dragStart(p.sx, p.sy) ? 'custom' : 'pan';
     if (mode === 'pan') {
       const g0 = ground(last.x, last.y), g1 = ground(e.clientX, e.clientY);
       if (g0 && g1) { const mx = g0.x - g1.x, mz = g0.z - g1.z, len = Math.hypot(mx, mz), cap = cam.dist * 0.5; const k = len > cap ? cap / len : 1; cam.target.x += mx * k; cam.target.z += mz * k; }
@@ -46,7 +47,7 @@ export function bindInput(canvas, view, h) {
   const up = (e) => {
     const p = pts.get(e.pointerId); if (!p) return;
     pts.delete(e.pointerId);
-    if (mode === 'pending' && performance.now() - downAt < 450 && e.type === 'pointerup') h.tap && h.tap(e.clientX, e.clientY);
+    if (mode === 'pending' && performance.now() - downAt < 650 && e.type === 'pointerup') h.tap && h.tap(e.clientX, e.clientY);
     if (mode === 'custom') h.dragEnd && h.dragEnd();
     mode = pts.size === 0 ? 'none' : 'wait';
   };

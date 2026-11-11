@@ -42,6 +42,7 @@ export class UI {
       <div id="nav">${NAV.map(([id, name, icon]) => `<button data-a="nav:${id}" id="nav-${id}">${ic(icon)}<span>${name}</span></button>`).join('')}</div>
       <div id="modal"></div>`;
     this.el = {}; for (const id of ['lv', 'lvb', 'speed', 'res', 'clim', 'popc', 'objc', 'alc', 'ovpop', 'banner', 'toasts', 'place', 'sheet', 'shti', 'shtabs', 'shbody', 'modal', 'heatfx', 'left', 'b-ov']) this.el[id] = document.getElementById(id);
+    { const r = this.el.res; const upd = () => r.classList.toggle('end', r.scrollLeft + r.clientWidth >= r.scrollWidth - 4); r.addEventListener('scroll', upd, { passive: true }); }
     root.addEventListener('click', (e) => { const t = e.target.closest('[data-a]'); if (t && !t.disabled) { e.preventDefault(); this.act(t.dataset.a.split(':'), t); } });
     root.addEventListener('pointerdown', () => { this.pressing = true; }, true);
     window.addEventListener('pointerup', () => { this.pressing = false; }, true);
@@ -189,7 +190,7 @@ export class UI {
     }
     // sheet
     const open = !!this.panel && !P;
-    el.sheet.classList.toggle('open', open);
+    el.sheet.classList.toggle('open', open); document.body.classList.toggle('sheet-open', open);
     el.left.style.display = (open || P) && innerWidth < 760 ? 'none' : '';
     if (open && (force || !this.pressing)) {
       const r = this.render(this.panel);
