@@ -1,6 +1,7 @@
 // Master Clicker model test: a Meshy-generated GLB, optimised offline, split into rigid parts at load time
 // so the legs and crane can be animated without a skeleton.
 import * as THREE from 'three';
+import { joinAtmosphere } from './surface.js';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { MeshoptDecoder } from 'three/examples/jsm/libs/meshopt_decoder.module.js';
 
@@ -57,6 +58,7 @@ export async function loadMasterClicker(url, mode = 'lit') {
   if (mode === 'pbr') material = new THREE.MeshStandardMaterial({ map: m0.map, normalMap: m0.normalMap, metalness: 0.55, roughness: 0.5, envMapIntensity: 0.9 });
   else material = new THREE.MeshLambertMaterial({ map: m0.map, normalMap: m0.normalMap });
   material.normalMapType = THREE.ObjectSpaceNormalMap;
+  joinAtmosphere(material, { windows: false });
   if (material.map) material.map.anisotropy = 4;
   const pivots = { crane: P(RIG.crane.pivot[0], RIG.crane.pivot[1], RIG.crane.pivot[2] * RIG.crane.keepSide) };
   for (const fr of ['f', 'r']) for (const s of [0, 1]) {

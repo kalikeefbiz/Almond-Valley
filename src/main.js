@@ -30,7 +30,7 @@ const game = {
     this.quality = q; setPref('quality', q);
     const dpr = window.devicePixelRatio || 1;
     this.view.pixelRatio = q === 'low' ? Math.min(dpr, 1) : q === 'med' ? Math.min(dpr, 2) : Math.min(dpr, 3);
-    this.view.resize();
+    this.view.setDetail(q); this.view.resize();
   },
 
   // ---- selection

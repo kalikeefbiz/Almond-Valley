@@ -5,6 +5,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { MeshoptDecoder } from 'three/examples/jsm/libs/meshopt_decoder.module.js';
 import { B, CELL } from './data.js';
+import { joinAtmosphere } from './surface.js';
 
 export const MODEL_TYPES = ['workshop', 'smokehouse', 'market', 'warehouse', 'fabrication'];
 const FILL = 0.97; // share of the footprint the model may cover
@@ -24,8 +25,8 @@ export function loadBuildingModel(type) {
     geo.computeBoundingBox(); geo.computeBoundingSphere();
     const m0 = src.material;
     if (m0.map) m0.map.anisotropy = 4;
-    // Lambert to match the rest of the valley; a faint self-light from the colour map keeps them readable at night.
-    const material = new THREE.MeshLambertMaterial({ map: m0.map, normalMap: m0.normalMap, emissive: 0x30241a, emissiveMap: m0.map, side: THREE.DoubleSide }); // Meshy leaves some open faces (roof edges, awnings)
+    // Same lighting model and atmosphere as the procedural buildings; window light is recovered from the baked texture.
+    const material = joinAtmosphere(new THREE.MeshLambertMaterial({ map: m0.map, normalMap: m0.normalMap, side: THREE.DoubleSide }));
     m0.metalnessMap?.dispose?.();
     return { geo, material, tris: geo.index ? geo.index.count / 3 : geo.attributes.position.count / 3 };
   });

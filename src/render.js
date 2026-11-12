@@ -5,12 +5,15 @@ import { footprint, cellZone } from './sim.js';
 import { World, cellToWorld, HALF, worldToCell, terrainH } from './world.js';
 import { loadMasterClicker, poseMasterClicker } from './clickerModel.js';
 import { MODEL_TYPES, loadBuildingModel } from './buildingModels.js';
-import { makeMaterial, buildingGeometry, heartwellGeometry, clickerGeometry, personGeometry, PAL } from './models.js';
+import { G, makeMaterial, buildingGeometry, clickerGeometry, personGeometry, lampGeometry, scrubGeometry, rockGeometry, pipeGeometry, PAL } from './models.js';
+import { buildHeartwell, HW_ANCHOR } from './heartwell.js';
+import { initSurface, makeWaterMaterial, U } from './surface.js';
+import { hash } from './terrain.js';
 
 const _v = new THREE.Vector3(), _d = new THREE.Object3D(), _col = new THREE.Color();
 const CLOTH = [0xcdb58f, 0x8a5f3c, 0x3d3a4a, 0xd89a22, 0x9c3f32, 0x3f7f86, 0x6f6a5c, 0xb8763c];
 const SKIN = [0xe6b98f, 0xc68e5e, 0x9a6540, 0x6f452c, 0xd9a577, 0x855536];
-const MAX_AGENTS = 84, MAX_PART = 420;
+const MAX_AGENTS = 84, MAX_PART = 520, MAX_HALO = 420, MASK = 256;
 
 export class View {
   constructor(canvas, sim) {
@@ -26,32 +29,110 @@ export class View {
     this.scene = new THREE.Scene();
     this.camera = new THREE.PerspectiveCamera(42, 1, 1, 1900);
     this.cam = { target: new THREE.Vector3(1, 0, -3), yaw: 0.42, pitch: 0.84, dist: 86 };   // opens on the settlement with the station and the line north in view
+    initSurface(r);
     this.world = new World(this.scene);
     this.mat = this.world.mat;
     this.geo = {}; this.bm = new Map(); this.cm = new Map();
     this.seenVersion = -1; this.env = { day: 1, heat: 0, dn: 0 };
     this.overlayMode = 'none'; this.placing = null; this.selected = null;
     this.clock = 0; this.overlayTimer = 0; this.statusTimer = 0;
-    this._lines(); this._overlay(); this._ghost(); this._selection(); this._people(); this._particles(); this._status(); this._zoneLines();
+    this._lines(); this._overlay(); this._ghost(); this._selection(); this._people(); this._particles(); this._status(); this._zoneLines(); this._dressing();
     this.setShadows(true);
     this.resize();
   }
 
   // ---------------------------------------------------------------- setup
+  // quality tiers: low drops bump detail and clouds; high doubles the shadow map
+  setDetail(q) { U.uDetail.value = q === 'low' ? 0 : 1; this.world.clouds = q !== 'low'; this.world.setShadowQuality(q === 'high' ? 2048 : 1024); this.halo.visible = true; this.vignette.visible = q !== 'low'; }
   setShadows(on) { this.shadows = on; this.renderer.shadowMap.enabled = on; this.world.setShadows(on); this.mat.needsUpdate = true; this.world.matFlat.needsUpdate = true; }
   resize() {
     const w = window.innerWidth, h = window.innerHeight;
     this.renderer.setPixelRatio(this.pixelRatio); this.renderer.setSize(w, h, false);
     this.camera.aspect = w / h; this.camera.fov = w < h ? 46 : 38; this.camera.updateProjectionMatrix();
-    if (this.pU) this.pU.uScale.value = h * this.pixelRatio * 0.9;
+    if (this.pU) this.pU.uScale.value = h * this.pixelRatio * 0.9; if (this.hU) this.hU.uScale.value = h * this.pixelRatio * 0.9;
   }
   _lines() {
-    const rg = new THREE.BoxGeometry(CELL * 0.995, 0.07, CELL * 0.995);
-    const c = new Float32Array(rg.attributes.position.count * 3).fill(1); rg.setAttribute('color', new THREE.BufferAttribute(c, 3)); rg.setAttribute('glow', new THREE.BufferAttribute(new Float32Array(rg.attributes.position.count), 1));
-    this.roads = new THREE.InstancedMesh(rg, this.mat, 2600); this.roads.receiveShadow = true; this.roads.count = 0; this.scene.add(this.roads);
-    const pg = new THREE.BoxGeometry(1, 0.26, 0.26);
-    pg.setAttribute('color', new THREE.BufferAttribute(new Float32Array(pg.attributes.position.count * 3).fill(1), 3)); pg.setAttribute('glow', new THREE.BufferAttribute(new Float32Array(pg.attributes.position.count).fill(0.25), 1));
-    this.pipes = new THREE.InstancedMesh(pg, this.mat, 3000); this.pipes.count = 0; this.scene.add(this.pipes);
+    // Roads are painted into the ground through the settlement mask (see surface.js): R roads, G aprons, B lamp light.
+    this.maskCv = document.createElement('canvas'); this.maskCv.width = this.maskCv.height = MASK;
+    this.maskCtx = this.maskCv.getContext('2d');
+    const t = this.maskTex = new THREE.CanvasTexture(this.maskCv); t.flipY = false; t.generateMipmaps = false; t.minFilter = t.magFilter = THREE.LinearFilter; t.colorSpace = THREE.NoColorSpace;
+    U.uMask.value = t;
+    this.pipes = new THREE.InstancedMesh(pipeGeometry(), this.mat, 3000); this.pipes.count = 0; this.pipes.castShadow = true; this.scene.add(this.pipes);
+  }
+  // Instanced settlement dressing: street lamps, dry scrub and stones on open ground, night halos, vignette.
+  _dressing() {
+    this.lampMesh = new THREE.InstancedMesh(lampGeometry(), this.mat, 110); this.lampMesh.count = 0; this.lampMesh.castShadow = true; this.scene.add(this.lampMesh);
+    this.scrubMesh = new THREE.InstancedMesh(scrubGeometry(), this.mat, 520); this.scrubMesh.count = 0; this.scene.add(this.scrubMesh);
+    this.pebMesh = new THREE.InstancedMesh(rockGeometry(), this.mat, 260); this.pebMesh.count = 0; this.pebMesh.castShadow = true; this.scene.add(this.pebMesh);
+    const g = new THREE.BufferGeometry();
+    this.hPos = new Float32Array(MAX_HALO * 3); this.hCol = new Float32Array(MAX_HALO * 4);
+    g.setAttribute('position', new THREE.BufferAttribute(this.hPos, 3)); g.setAttribute('hc', new THREE.BufferAttribute(this.hCol, 4));
+    this.hU = { uScale: { value: 600 }, uNight: U.uNight };
+    this.halo = new THREE.Points(g, new THREE.ShaderMaterial({
+      uniforms: this.hU, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+      vertexShader: 'attribute vec4 hc; varying vec4 vC; uniform float uScale; void main(){ vC = hc; vec4 mv = modelViewMatrix * vec4(position,1.0); gl_PointSize = min(160.0, hc.a * uScale / -mv.z); gl_Position = projectionMatrix * mv; }',
+      fragmentShader: 'varying vec4 vC; uniform float uNight; void main(){ float d = length(gl_PointCoord - 0.5) * 2.0; float a = pow(max(0.0, 1.0 - d), 2.2); gl_FragColor = vec4(vC.rgb * a * (0.10 + 0.75 * uNight), 1.0); }',
+    }));
+    this.halo.frustumCulled = false; this.halo.renderOrder = 4; this.scene.add(this.halo); g.setDrawRange(0, 0);
+    this.vignette = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), new THREE.ShaderMaterial({
+      transparent: true, depthTest: false, depthWrite: false,
+      vertexShader: 'varying vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }',
+      fragmentShader: 'varying vec2 vUv; void main(){ vec2 p = vUv - 0.5; float v = smoothstep(0.38, 0.86, length(p * vec2(0.9, 1.0))); gl_FragColor = vec4(0.07, 0.03, 0.02, v * 0.5); }',
+    }));
+    this.vignette.frustumCulled = false; this.vignette.renderOrder = 20; this.scene.add(this.vignette);
+  }
+  _dress() {
+    const sim = this.sim, S = sim.S, C = sim.C, g = this.maskCtx, K = MASK / N, occ = C.occ;
+    g.globalCompositeOperation = 'source-over'; g.fillStyle = '#000'; g.fillRect(0, 0, MASK, MASK);
+    g.globalCompositeOperation = 'lighter';
+    // roads
+    g.strokeStyle = '#ff0000'; g.lineWidth = K * 0.82; g.lineCap = 'round'; g.lineJoin = 'round'; g.beginPath();
+    const R = S.roads, lamps = [];
+    let nl = 0;
+    for (let z = 0; z < N; z++) for (let x = 0; x < N; x++) {
+      const i = z * N + x; if (!R[i]) continue;
+      const cx = (x + 0.5) * K, cz = (z + 0.5) * K, r = x < N - 1 && R[i + 1], d = z < N - 1 && R[i + N];
+      if (r) { g.moveTo(cx, cz); g.lineTo(cx + K, cz); } if (d) { g.moveTo(cx, cz); g.lineTo(cx, cz + K); }
+      if (!r && !d) { g.moveTo(cx, cz); g.lineTo(cx + 0.01, cz); }
+      // a street lamp on some road cells, on a side that is open ground
+      if (hash(x * 3 + 1, z * 7 + 2) < 0.15 && nl < 110) {
+        for (const [dx, dz] of [[1, 0], [0, 1], [-1, 0], [0, -1]]) {
+          const nx = x + dx, nz = z + dz; if (nx < 0 || nz < 0 || nx >= N || nz >= N || R[nz * N + nx] || occ[nz * N + nx] || !cellZone(nx, nz)) continue;
+          const wx = cellToWorld(x) + 1 + dx * 0.82, wz = cellToWorld(z) + 1 + dz * 0.82;
+          _d.position.set(wx, 0, wz); _d.rotation.set(0, Math.atan2(-dx, -dz) + Math.PI / 2, 0); _d.scale.setScalar(1); _d.updateMatrix(); this.lampMesh.setMatrixAt(nl++, _d.matrix);
+          lamps.push([wx, 2.3, wz, 1, 0]); break;
+        }
+      }
+    }
+    g.stroke();
+    this.lampMesh.count = nl; this.lampMesh.instanceMatrix.needsUpdate = true;
+    // aprons: trodden ground and contact shadow around every building
+    const rr = (x, z, w, d, rad) => { g.beginPath(); if (g.roundRect) g.roundRect(x * K, z * K, w * K, d * K, rad * K); else g.rect(x * K, z * K, w * K, d * K); g.fill(); };
+    for (const b of S.buildings) {
+      const def = B[b.type]; if (def.line) continue; const f = footprint(b);
+      g.fillStyle = 'rgba(0,255,0,0.26)'; rr(f.x - 0.7, f.z - 0.7, f.w + 1.4, f.d + 1.4, 0.8);
+      g.fillStyle = b.type === 'farm' ? 'rgba(0,255,0,0.2)' : 'rgba(0,255,0,0.42)'; rr(f.x - 0.12, f.z - 0.12, f.w + 0.24, f.d + 0.24, 0.3);
+    }
+    // lights: building lanterns, street lamps, the viaduct, the Heartwell's glow
+    for (const e of this.bm.values()) { if (e.b.progress != null) continue; for (const l of e.lamps) lamps.push(l); }
+    for (const p of this.world.railLamps) lamps.push([p[0], p[1], p[2], 1.2, 2]);
+    let nh = 0;
+    for (const [x, y, z, pw, kind] of lamps) {
+      if (kind === 0 && y < 6) { const px = (x + HALF) / CELL * K, pz = (z + HALF) / CELL * K, rad = K * Math.min(2.3, 1.2 + pw * 0.5), gr = g.createRadialGradient(px, pz, 0, px, pz, rad); gr.addColorStop(0, `rgba(0,0,255,${Math.min(0.85, 0.7 * pw)})`); gr.addColorStop(0.5, 'rgba(0,0,255,0.3)'); gr.addColorStop(1, 'rgba(0,0,255,0)'); g.fillStyle = gr; g.fillRect(px - rad, pz - rad, rad * 2, rad * 2); }
+      if (nh < MAX_HALO) { const o = nh * 3, c = nh * 4, cy = kind === 1; this.hPos[o] = x; this.hPos[o + 1] = y; this.hPos[o + 2] = z; this.hCol[c] = cy ? 0.3 : 1.0; this.hCol[c + 1] = cy ? 0.85 : 0.62; this.hCol[c + 2] = cy ? 1.0 : 0.27; this.hCol[c + 3] = 2.6 * Math.sqrt(pw); nh++; }
+    }
+    this.maskTex.needsUpdate = true;
+    const hg = this.halo.geometry; hg.setDrawRange(0, nh); hg.attributes.position.needsUpdate = true; hg.attributes.hc.needsUpdate = true;
+    // scrub and stones on open ground
+    let ns = 0, np = 0;
+    for (let z = 1; z < N - 1; z++) for (let x = 1; x < N - 1; x++) {
+      const i = z * N + x, h = hash(x * 5 + 3, z * 11 + 7); if (h > 0.2 || occ[i] || R[i] || S.pipes[i] || !cellZone(x, z)) continue;
+      const wx = cellToWorld(x) + 0.3 + hash(x, z + 40) * 1.4, wz = cellToWorld(z) + 0.3 + hash(x + 40, z) * 1.4, k = hash(x + 9, z + 9);
+      if (h < 0.14 && ns < 520) { _d.position.set(wx, 0, wz); _d.rotation.set(0, k * 6.3, 0); _d.scale.setScalar(0.8 + k * 1.1); _d.updateMatrix(); this.scrubMesh.setMatrixAt(ns, _d.matrix); this.scrubMesh.setColorAt(ns++, _col.setHSL(0.11 + k * 0.09, 0.3 + k * 0.2, 0.3 + k * 0.14)); }
+      else if (h >= 0.14 && np < 260) { const sc = 0.14 + k * 0.3; _d.position.set(wx, sc * 0.25, wz); _d.rotation.set(k * 3, k * 9, 0); _d.scale.set(sc, sc * 0.7, sc * 1.2); _d.updateMatrix(); this.pebMesh.setMatrixAt(np, _d.matrix); this.pebMesh.setColorAt(np++, _col.setHSL(0.05 + k * 0.03, 0.3, 0.3 + k * 0.15)); }
+    }
+    this.scrubMesh.count = ns; this.scrubMesh.instanceMatrix.needsUpdate = true; if (this.scrubMesh.instanceColor) this.scrubMesh.instanceColor.needsUpdate = true;
+    this.pebMesh.count = np; this.pebMesh.instanceMatrix.needsUpdate = true; if (this.pebMesh.instanceColor) this.pebMesh.instanceColor.needsUpdate = true;
   }
   _overlay() {
     this.ovData = new Uint8Array(N * N * 4);
@@ -133,7 +214,7 @@ export class View {
     if (mode !== 'new') return;
     for (const t of MODEL_TYPES) if (!this.bmod[t]) {
       this.bmod[t] = 'loading';
-      loadBuildingModel(t).then(m => { m.geo.userData.smoke = this.geoFor(t).userData.smoke; this.bmod[t] = m; this.seenVersion = -1; })
+      loadBuildingModel(t).then(m => { m.geo.userData.smoke = this.geoFor(t).userData.smoke; m.geo.userData.lamps = this.geoFor(t).userData.lamps; this.bmod[t] = m; this.seenVersion = -1; })
         .catch(err => { console.warn(`${t} model failed to load; using built-in shapes.`, err); this.bmod[t] = 'failed'; });
     }
   }
@@ -153,17 +234,7 @@ export class View {
       if (b.progress == null) e.mesh.scale.y = 1;
     }
     for (const [id, e] of this.bm) if (!seen.has(id)) { this._dropB(e); this.bm.delete(id); }
-    // roads
     let n = 0;
-    for (let i = 0; i < N * N && n < 2600; i++) {
-      if (!S.roads[i]) continue;
-      const x = i % N, z = (i / N) | 0;
-      _d.position.set(cellToWorld(x) + 1, 0.06, cellToWorld(z) + 1); _d.rotation.set(0, 0, 0); _d.scale.set(1, 1, 1); _d.updateMatrix();
-      this.roads.setMatrixAt(n, _d.matrix);
-      const v = 0.86 + ((x * 31 + z * 17) % 7) * 0.02;
-      this.roads.setColorAt(n, _col.setRGB(0.34 * v, 0.27 * v, 0.21 * v)); n++;
-    }
-    this.roads.count = n; this.roads.instanceMatrix.needsUpdate = true; if (this.roads.instanceColor) this.roads.instanceColor.needsUpdate = true;
     // pipes
     n = 0; const P = S.pipes, occ = sim.C.occ, net = sim.C.pipeNet;
     const hwF = sim.C.hwF;
@@ -173,13 +244,14 @@ export class View {
       const x = i % N, z = (i / N) | 0, wx = cellToWorld(x) + 1, wz = cellToWorld(z) + 1;
       const on = net[i]; _col.setHex(on ? 0x3f8fc4 : 0x8a6a4a);
       const ex = linkTo(x - 1, z) || linkTo(x + 1, z), ez = linkTo(x, z - 1) || linkTo(x, z + 1);
-      const seg = (len, rot, ox, oz) => { _d.position.set(wx + ox, 0.24, wz + oz); _d.rotation.set(0, rot, 0); _d.scale.set(len, 1, 1); _d.updateMatrix(); this.pipes.setMatrixAt(n, _d.matrix); this.pipes.setColorAt(n, _col); n++; };
+      const seg = (len, rot, ox, oz) => { _d.position.set(wx + ox, 0.2, wz + oz); _d.rotation.set(0, rot, 0); _d.scale.set(len, 1, 1); _d.updateMatrix(); this.pipes.setMatrixAt(n, _d.matrix); this.pipes.setColorAt(n, _col); n++; };
       if (ex || !ez) { const l = linkTo(x - 1, z), r = linkTo(x + 1, z); const a = l ? -1 : -0.3, b2 = r ? 1 : 0.3; seg((b2 - a), 0, (a + b2) / 2, 0); }
       if (ez) { const u = linkTo(x, z - 1), dn = linkTo(x, z + 1); const a = u ? -1 : -0.3, b2 = dn ? 1 : 0.3; seg((b2 - a), Math.PI / 2, 0, (a + b2) / 2); }
     }
     this.pipes.count = n; this.pipes.instanceMatrix.needsUpdate = true; if (this.pipes.instanceColor) this.pipes.instanceColor.needsUpdate = true;
     for (const k in this.zoneLines) this.zoneLines[k].visible = !S.zones[k];
     this.agentsDirty = true;
+    this._dress();
     this.fillOverlay();
     this.setSelected(this.selected);
   }
@@ -190,15 +262,21 @@ export class View {
     const e = { key, b, group, smoke: [], hw: null };
     let geo;
     if (b.type === 'heartwell') {
-      const hg = heartwellGeometry(this.sim.S.hw.lv);
-      geo = hg.static; e.ownGeo = [hg.static, hg.wheel];
-      const wheels = [-1, 1].map(s => { const w = new THREE.Mesh(hg.wheel, this.mat); w.position.set(s * 5.3, 0.9, 0); w.castShadow = true; group.add(w); return w; });
-      const wm = new THREE.MeshLambertMaterial({ color: 0x48cfee, emissive: 0x145e7c, transparent: true, opacity: 0.9 });
-      const mkArc = (a0) => { const g = new THREE.RingGeometry(3.72, 7.5, 28, 1, a0, Math.PI * 0.66); g.rotateX(-Math.PI / 2); const m = new THREE.Mesh(g, wm); group.add(m); return m; };
-      const pools = [mkArc(Math.PI * 0.17), mkArc(Math.PI * 1.17)];
-      const bm2 = new THREE.MeshLambertMaterial({ color: 0x3aa8c8, emissive: 0x0e4860, transparent: true, opacity: 0.9 });
-      const basins = [-1, 1].map(s => { const g = new THREE.PlaneGeometry(4.5, 2.2); g.rotateX(-Math.PI / 2); const m = new THREE.Mesh(g, bm2); m.position.set(s * 5.3, 0.5, 0); group.add(m); return m; });
-      e.hw = { wheels, pools, basins, mats: [wm, bm2], spin: [0, 0] };
+      const H = buildHeartwell(this.sim.S.hw.lv);
+      geo = H.base; e.ownGeo = [H.base, H.core, H.crown, H.shuttle, H.turA, H.turB, H.wheel, H.silo, H.pump]; e.pick = [];
+      const part = (g, mat, x = 0, y = 0, z = 0) => { const m = new THREE.Mesh(g, mat); m.position.set(x, y, z); m.castShadow = true; m.receiveShadow = true; m.userData.bid = b.id; group.add(m); e.pick.push(m); return m; };
+      // one material per simulated component, so wear and breakdowns show on the part that suffers them
+      const cm = { drill: makeMaterial(), turA: makeMaterial(), turB: makeMaterial(), silo: makeMaterial(), pump: makeMaterial() };
+      part(H.core, cm.drill); part(H.turA, cm.turA); part(H.turB, cm.turB); part(H.silo, cm.silo); part(H.pump, cm.pump);
+      const crown = part(H.crown, cm.drill, 0, H.crownY, 0), shuttle = part(H.shuttle, cm.drill, 0, H.shuttleY[0], 0);
+      const wheels = [-1, 1].map(s => part(H.wheel, s < 0 ? cm.turA : cm.turB, s * H.wheelPos[0], H.wheelPos[1], 0));
+      const wm = makeWaterMaterial(0x2596b8), bm2 = makeWaterMaterial(0x1f7a9c);
+      const rg = new THREE.RingGeometry(4.26, 7.3, 48); rg.rotateX(-Math.PI / 2); const ring = new THREE.Mesh(rg, wm); group.add(ring);
+      const basins = [-1, 1].map(s => { const g = new THREE.PlaneGeometry(4.0, 2.75); g.rotateX(-Math.PI / 2); const m = new THREE.Mesh(g, bm2); m.position.set(s * 5.68, 0.5, 0); group.add(m); return m; });
+      e.ownGeo.push(rg, basins[0].geometry, basins[1].geometry);
+      e.hw = { H, cm, crown, shuttle, wheels, pools: [ring], basins, mats: [wm, bm2, ...Object.values(cm)], spin: [0, 0], drive: 0, phase: 0 };
+      for (const g of [H.core, H.turA, H.turB]) for (const sm of g.userData.smoke || []) H.base.userData.smoke.push(sm);
+      H.base.userData.lamps.push([0, 6, 0.9, 5, 1], [0, 2.2, 6.2, 2.2, 1], [-5.75, 2.2, 1.6, 1.6, 1], [5.75, 2.2, 1.6, 1.6, 1]);
     } else geo = this.geoFor(b.type);
     const model = b.type !== 'heartwell' && this.modelFor(b.type); if (model) geo = model.geo;
     const mesh = new THREE.Mesh(geo, model ? model.material : this.mat);
@@ -212,6 +290,7 @@ export class View {
     scaf.scale.set(f.w * CELL - 0.2, h, f.d * CELL - 0.2); scaf.position.y = h / 2; scaf.visible = false; group.add(scaf); e.scaf = scaf; e.h = h;
     const cs = Math.cos(mesh.rotation.y), sn = Math.sin(mesh.rotation.y);
     for (const [x, y, z] of geo.userData.smoke || []) e.smoke.push([group.position.x + x * cs + z * sn, y, group.position.z - x * sn + z * cs]);
+    e.lamps = (geo.userData.lamps || []).map(([x, y, z, pw, kind]) => [group.position.x + x * cs + z * sn, y, group.position.z - x * sn + z * cs, pw || 1, kind || 0]);
     this.scene.add(group);
     e.cx = group.position.x; e.cz = group.position.z; e.def = def;
     return e;
@@ -222,18 +301,11 @@ export class View {
   // Visible marks of a building's upgrade level: Lv 2 adds a gold-banded iron stack,
   // Lv 3 an aether tank on the far corner. Kept to a few primitives so many upgraded buildings stay cheap.
   _levelDecor(f, lv, geo) {
-    const M = this._lvMats || (this._lvMats = { iron: new THREE.MeshLambertMaterial({ color: 0x3b3430 }), gold: new THREE.MeshLambertMaterial({ color: 0xe2a522 }), glass: new THREE.MeshLambertMaterial({ color: 0x4fd8f0, emissive: 0x1d7f99 }) });
-    const g = new THREE.Group(), hw = f.w * CELL / 2 - 0.55, hd = f.d * CELL / 2 - 0.55, top = Math.min(6, (geo.boundingBox && geo.boundingBox.max.y) || 3);
-    const cyl = (r, h, m) => new THREE.Mesh(new THREE.CylinderGeometry(r, r, h, 10), m);
-    const sh = top + 1.1, stack = cyl(0.2, sh, M.iron); stack.position.set(hw, sh / 2, -hd); g.add(stack);
-    for (const y of [sh * 0.45, sh - 0.35]) { const ring = cyl(0.26, 0.2, M.gold); ring.position.set(hw, y, -hd); g.add(ring); }
-    if (lv >= 3) {
-      const tank = cyl(0.45, 1.8, M.iron); tank.position.set(-hw, 0.9, -hd); g.add(tank);
-      const glass = cyl(0.38, 1.2, M.glass); glass.position.set(-hw, 1.0, -hd); glass.scale.set(1.25, 1, 1.25); g.add(glass);
-      const cap = cyl(0.52, 0.2, M.gold); cap.position.set(-hw, 1.9, -hd); g.add(cap);
-    }
-    g.traverse(o => { if (o.isMesh) o.castShadow = true; });
-    return g;
+    const g = new G(), hw = f.w * CELL / 2 - 0.55, hd = f.d * CELL / 2 - 0.55, top = Math.min(6, (geo.boundingBox && geo.boundingBox.max.y) || 3);
+    g.stack(hw, 0, -hd, top + 1.1, 0.2);
+    if (lv >= 3) { g.box(-hw, 0, -hd, 1.1, 0.25, 1.1, PAL.stoneD); g.tank(-hw, 0.25, -hd, 0.42, 1.5, PAL.alloy, true); }
+    const m = new THREE.Mesh(g.done(), this.mat); m.castShadow = true;
+    return m;
   }
   setOverlay(mode) { this.overlayMode = mode; this.fillOverlay(); }
   fillOverlay() {
@@ -340,7 +412,7 @@ export class View {
     let best = null, bd = 3.2;
     for (const [id, e] of this.cm) { const d = rc.ray.distanceToPoint(_v.set(e.group.position.x, 1.2, e.group.position.z)); if (d < bd) { bd = d; best = id; } }
     if (best != null) return { clicker: best };
-    const meshes = []; for (const e of this.bm.values()) meshes.push(e.mesh);
+    const meshes = []; for (const e of this.bm.values()) { meshes.push(e.mesh); if (e.pick) meshes.push(...e.pick); }
     const hit = rc.intersectObjects(meshes, false)[0];
     if (hit) return { building: hit.object.userData.bid };
     const c = this.cellAt(cx, cy); if (!c || c.x < 0 || c.z < 0 || c.x >= N || c.z >= N) return {};
@@ -361,14 +433,16 @@ export class View {
     const p = this.parts[this.pNext]; this.pNext = (this.pNext + 1) % MAX_PART;
     p.x = x; p.y = y; p.z = z; p.life = 0;
     const r = Math.random;
-    if (kind === 'smoke') { p.max = 2.6 + r() * 1.6; p.vx = 0.5 + r() * 0.4; p.vy = 1.5 + r() * 0.6; p.vz = (r() - 0.5) * 0.4; p.s = 0.7; p.grow = 0.9; const v = 0.55 + r() * 0.25; p.r = v; p.g = v * 0.95; p.b = v * 0.9; p.a = 0.5; }
-    else if (kind === 'steam') { p.max = 2.0 + r(); p.vx = 0.3 + r() * 0.3; p.vy = 2.0 + r(); p.vz = (r() - 0.5) * 0.5; p.s = 0.8; p.grow = 1.3; p.r = 0.95; p.g = 0.95; p.b = 0.98; p.a = 0.42; }
+    p.self = false;
+    if (kind === 'smoke') { p.max = 3.4 + r() * 2; p.vx = 0.5 + r() * 0.4; p.vy = 1.3 + r() * 0.6; p.vz = (r() - 0.5) * 0.4; p.s = 0.8; p.grow = 1.0; const v = 0.5 + r() * 0.22; p.r = v * 1.04; p.g = v * 0.97; p.b = v * 0.9; p.a = 0.42; }
+    else if (kind === 'soot') { p.max = 3.0 + r() * 2; p.vx = 0.5 + r() * 0.5; p.vy = 1.6 + r() * 0.8; p.vz = (r() - 0.5) * 0.5; p.s = 0.9; p.grow = 1.2; const v = 0.07 + r() * 0.07; p.r = v; p.g = v; p.b = v; p.a = 0.7; }
+    else if (kind === 'steam') { p.max = 2.0 + r(); p.vx = 0.3 + r() * 0.3; p.vy = 2.0 + r(); p.vz = (r() - 0.5) * 0.5; p.s = 0.9; p.grow = 1.5; p.r = 0.98; p.g = 0.95; p.b = 0.92; p.a = 0.36; }
     else if (kind === 'dust') { p.max = 0.9 + r() * 0.6; p.vx = (r() - 0.5) * 1.2; p.vy = 0.5 + r() * 0.5; p.vz = (r() - 0.5) * 1.2; p.s = 0.5; p.grow = 0.9; p.r = 0.78; p.g = 0.6; p.b = 0.42; p.a = 0.4; }
-    else if (kind === 'spark') { p.max = 0.35 + r() * 0.3; p.vx = (r() - 0.5) * 4; p.vy = 2 + r() * 3; p.vz = (r() - 0.5) * 4; p.s = 0.22; p.grow = 0; p.r = 1; p.g = 0.8; p.b = 0.3; p.a = 1; }
-    else if (kind === 'aether') { p.max = 1.6 + r(); p.vx = (r() - 0.5) * 0.4; p.vy = 1.6 + r(); p.vz = (r() - 0.5) * 0.4; p.s = 0.5; p.grow = 0.5; p.r = 0.45; p.g = 0.95; p.b = 1; p.a = 0.55; }
+    else if (kind === 'spark') { p.max = 0.35 + r() * 0.3; p.vx = (r() - 0.5) * 4; p.vy = 2 + r() * 3; p.vz = (r() - 0.5) * 4; p.s = 0.22; p.grow = 0; p.r = 1; p.g = 0.8; p.b = 0.3; p.a = 1; p.self = true; }
+    else if (kind === 'aether') { p.max = 1.6 + r(); p.vx = (r() - 0.5) * 0.4; p.vy = 1.6 + r(); p.vz = (r() - 0.5) * 0.4; p.s = 0.5; p.grow = 0.5; p.r = 0.45; p.g = 0.95; p.b = 1; p.a = 0.55; p.self = true; }
   }
   _updParticles(dt) {
-    const P = this.pPos, Cc = this.pCol, Sz = this.pSize;
+    const P = this.pPos, Cc = this.pCol, Sz = this.pSize, L = this.partLight || [1, 1, 1];
     for (let i = 0; i < MAX_PART; i++) {
       const p = this.parts[i];
       if (p.life >= p.max) { Sz[i] = 0; Cc[i * 4 + 3] = 0; continue; }
@@ -376,7 +450,7 @@ export class View {
       const t = p.life / p.max;
       P[i * 3] = p.x; P[i * 3 + 1] = p.y; P[i * 3 + 2] = p.z;
       Sz[i] = p.s + p.grow * p.life;
-      Cc[i * 4] = p.r; Cc[i * 4 + 1] = p.g; Cc[i * 4 + 2] = p.b; Cc[i * 4 + 3] = p.a * (1 - t) * Math.min(1, t * 8);
+      if (p.self) { Cc[i * 4] = p.r; Cc[i * 4 + 1] = p.g; Cc[i * 4 + 2] = p.b; } else { Cc[i * 4] = p.r * L[0]; Cc[i * 4 + 1] = p.g * L[1]; Cc[i * 4 + 2] = p.b * L[2]; } Cc[i * 4 + 3] = p.a * (1 - t) * Math.min(1, t * 8);
     }
     const g = this.pMesh.geometry; g.attributes.position.needsUpdate = true; g.attributes.pc.needsUpdate = true; g.attributes.size.needsUpdate = true;
   }
@@ -535,7 +609,10 @@ export class View {
     }
     this.camera.position.set(cam.target.x + Math.sin(cam.yaw) * cp * cam.dist, cam.target.y + sp * cam.dist, cam.target.z + Math.cos(cam.yaw) * cp * cam.dist);
     this.camera.lookAt(cam.target);
-    this.env = this.world.update(sim, this.camera, cam.target);
+    U.uTime.value = this.clock;
+    this.env = this.world.update(sim, this.camera, cam.target, cam.dist);
+    { const d = this.env.day, w = Math.min(1, this.env.dusk * 0.8 + (this.env.low || 0) * 0.5); this.partLight = [0.3 + 0.7 * d + 0.12 * w, 0.32 + 0.66 * d, 0.4 + 0.58 * d - 0.14 * w]; }
+    this.renderer.toneMappingExposure = 1.04 + this.env.dn * 0.2;
     const speed = simH > 0 ? Math.min(4, simH / Math.max(1e-4, dt) / (24 / DAY_SECONDS)) : 0;   // = game speed multiplier
     // buildings: construction, smoke, heartwell
     const emit = dt * (0.5 + Math.min(2, speed) * 0.5) * (simH > 0 ? 1 : 0);
@@ -545,17 +622,29 @@ export class View {
       if (!this.inView(e.cx, e.cz)) continue;
       if (e.smoke.length && b.progress == null && !b.broken) {
         const act = def.housing ? (def.tier > 1 ? 0.35 : 0) : b.type === 'heartwell' ? Math.min(1, sim.powerGen / 20) : b.type === 'station' ? 0 : Math.min(1, b.eff || 0);
-        if (act > 0) for (const s of e.smoke) if (Math.random() < emit * 2.6 * act) this.puff(s[0], s[1], s[2], b.type === 'heartwell' || b.type === 'generator' ? 'steam' : 'smoke');
+        if (act > 0) for (const s of e.smoke) if (Math.random() < emit * (b.type === 'heartwell' ? 1.5 : 2.6) * act) this.puff(s[0], s[1], s[2], b.type === 'heartwell' || b.type === 'generator' ? 'steam' : 'smoke');
       }
       if ((b.progress != null || b.upgrade) && b.crew > 0 && Math.random() < emit * 3) this.puff(e.cx + (Math.random() - 0.5) * 3, 0.5, e.cz + (Math.random() - 0.5) * 3, 'dust');
       if (e.hw) {
-        const hw = S.hw, cap = HW.tur.base * HW.turMult[hw.lv.tur - 1];
-        e.hw.wheels.forEach((w, i) => { const out = (sim.turOut ? sim.turOut[i ? 'turB' : 'turA'] : 0) / cap; e.hw.spin[i] += (out - e.hw.spin[i]) * Math.min(1, dt * 1.5); w.rotation.z -= e.hw.spin[i] * dt * 2.2 * (i ? -1 : 1) * Math.max(0.0, Math.min(2.5, speed)); });
+        const hw = S.hw, cap = HW.tur.base * HW.turMult[hw.lv.tur - 1], sp = Math.max(0, Math.min(2.5, speed));
+        e.hw.wheels.forEach((w, i) => { const out = (sim.turOut ? sim.turOut[i ? 'turB' : 'turA'] : 0) / cap; e.hw.spin[i] += (out - e.hw.spin[i]) * Math.min(1, dt * 1.5); w.rotation.z -= e.hw.spin[i] * dt * 2.0 * (i ? -1 : 1) * sp; });
+        // the drill's drive crown and crosshead follow real extraction
+        const drv = hw.broken.drill ? 0 : Math.min(1.2, (sim.hwRates.ext || 0) / (HW.ext.base * HW.mult[hw.lv.ext - 1]) * 1.4);
+        e.hw.drive += (drv - e.hw.drive) * Math.min(1, dt * 1.5);
+        e.hw.crown.rotation.y += e.hw.drive * dt * 1.5 * sp; e.hw.phase += e.hw.drive * dt * 1.2 * sp;
+        const sy = e.hw.H.shuttleY; e.hw.shuttle.position.y = sy[0] + (sy[1] - sy[0]) * (0.5 - 0.5 * Math.cos(e.hw.phase));
+        // reserve pools and coolant basins show the simulated volumes
         const lvl = Math.min(1, S.res.water / sim.C.waterCap);
-        for (const p of e.hw.pools) p.position.y += ((0.2 + lvl * 0.72) - p.position.y) * Math.min(1, dt * 2);
+        for (const p of e.hw.pools) p.position.y += ((0.2 + lvl * 0.78) - p.position.y) * Math.min(1, dt * 2);
         const cl = Math.min(1, hw.coolant / 120);
-        for (const p of e.hw.basins) p.position.y += ((0.2 + cl * 0.75) - p.position.y) * Math.min(1, dt * 2);
-        e.hw.mats[0].opacity = 0.35 + 0.55 * Math.min(1, lvl * 6);
+        for (const p of e.hw.basins) p.position.y += ((0.22 + cl * 0.8) - p.position.y) * Math.min(1, dt * 2);
+        e.hw.mats[0].opacity = 0.4 + 0.54 * Math.min(1, lvl * 6);
+        // wear darkens and rusts a component; a failed one goes dead, smokes and sparks
+        for (const c in e.hw.cm) {
+          const m = e.hw.cm[c], k = Math.max(0, Math.min(1, (hw.cond[c] - 25) / 55));
+          if (hw.broken[c]) { m.color.setRGB(0.36, 0.33, 0.32); const a = HW_ANCHOR[c]; if (Math.random() < dt * 7) this.puff(e.cx + a[0] + (Math.random() - 0.5), a[1], e.cz + a[2] + (Math.random() - 0.5), Math.random() < 0.8 ? 'soot' : 'spark'); }
+          else m.color.setRGB(0.74 + 0.26 * k, 0.6 + 0.4 * k, 0.5 + 0.5 * k);
+        }
       }
     }
     for (const nd of NODES) if (nd.type === 'vent' && Math.random() < emit * 2 && this.inView(nd._mesh.position.x, nd._mesh.position.z)) this.puff(nd._mesh.position.x + (Math.random() - 0.5), 1, nd._mesh.position.z + (Math.random() - 0.5), 'aether');
@@ -585,7 +674,7 @@ export class View {
       else if (def.waterRadius && !this.sim.C.onNet[b.id]) kind = 'warn';
       else if (b.type === 'pylon' && !this.sim.C.pylonOn[b.id]) kind = 'warn';
       if (!kind) continue;
-      const s = this.stSprites[n++]; s.material = this.stMat[kind]; s.position.set(e.cx, e.h + 2.2, e.cz); const sc = Math.max(2.2, this.cam.dist * 0.045); s.scale.set(sc, sc, 1); s.visible = true;
+      const s = this.stSprites[n++]; s.material = this.stMat[kind]; s.position.set(e.cx, e.h + 2.2, e.cz); const sc = Math.max(1.8, this.cam.dist * 0.034); s.scale.set(sc, sc, 1); s.visible = true;
     }
     for (; n < this.stSprites.length; n++) this.stSprites[n].visible = false;
   }
